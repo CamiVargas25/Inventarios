@@ -23,8 +23,8 @@ st.set_page_config(
 )
 
 # Paleta de marca Huevos Kikes
-COLOR_PRIMARIO = "#D52B1E"   # rojo
-COLOR_ACENTO = "#FDB813"     # amarillo
+COLOR_PRIMARIO = "#3DAE2B"   # verde Kikes
+COLOR_ACENTO = "#F7941D"     # naranja (yema del logo)
 COLOR_TEXTO = "#1A1A1A"
 
 ARCHIVO_DATOS = "Inventario Hoy.xlsx"
@@ -34,19 +34,19 @@ HOJA_DATOS = "INV. EDADES"
 st.markdown(
     f"""
     <style>
+        @import url('https://fonts.googleapis.com/css2?family=Nunito:wght@400;700;800;900&display=swap');
+        html, body, [class*="css"] {{
+            font-family: 'Nunito', sans-serif;
+        }}
         .titulo-principal {{
             color: {COLOR_PRIMARIO};
-            font-size: 2.2rem;
-            font-weight: 800;
-            margin-bottom: 0;
-        }}
-        .subtitulo {{
-            color: #555;
-            font-size: 1rem;
-            margin-top: 0;
+            font-family: 'Nunito', sans-serif;
+            font-size: 3.4rem;
+            font-weight: 900;
+            margin-bottom: 0.4rem;
         }}
         div[data-testid="stMetric"] {{
-            background-color: #F7F7F7;
+            background-color: #F2FAF0;
             border-left: 5px solid {COLOR_PRIMARIO};
             border-radius: 8px;
             padding: 12px 16px;
@@ -76,7 +76,7 @@ def cargar_datos(ruta: str, hoja: str) -> pd.DataFrame:
 
     # Tipos numéricos seguros
     if "edad" in df.columns:
-        df["edad"] = pd.to_numeric(df["edad"], errors="coerce")
+        df["edad"] = pd.to_numeric(df["edad"], errors="coerce").astype("Int64")
     if "cantidad" in df.columns:
         df["cantidad"] = pd.to_numeric(df["cantidad"], errors="coerce").fillna(0)
 
@@ -103,7 +103,6 @@ except ValueError:
 # ENCABEZADO
 # ---------------------------------------------------------------------------
 st.markdown('<p class="titulo-principal">🥚 Inventario de Edades</p>', unsafe_allow_html=True)
-st.markdown('<p class="subtitulo">Inventario actual por plantas y centros de distribución</p>', unsafe_allow_html=True)
 st.divider()
 
 
@@ -147,8 +146,11 @@ st.divider()
 inv_total = dff["cantidad"].sum()
 und_mas_6 = dff.loc[dff["edad"] > 6, "cantidad"].sum()
 und_mas_10 = dff.loc[dff["edad"] >= 10, "cantidad"].sum()
+# Edad ponderada: ignora filas sin edad para no romper el cálculo
+_val = dff.dropna(subset=["edad"])
+_peso = _val["cantidad"].sum()
 edad_prom = (
-    (dff["edad"] * dff["cantidad"]).sum() / inv_total if inv_total > 0 else 0
+    (_val["edad"].astype(float) * _val["cantidad"]).sum() / _peso if _peso > 0 else 0
 )
 pct_mas_6 = (und_mas_6 / inv_total * 100) if inv_total > 0 else 0
 
@@ -204,10 +206,14 @@ def color_edad(val):
     return ""
 
 
+# Asegura que Item se muestre como entero (es un código, sin decimales)
+if "Item" in tabla.columns:
+    tabla["Item"] = pd.to_numeric(tabla["Item"], errors="coerce").astype("Int64")
+
 styler = (
     tabla.style
     .map(color_edad, subset=["Edad"])
-    .format({"Suma de Cantidad": "{:,.0f}", "Edad": "{:.0f}"})
+    .format({"Suma de Cantidad": "{:,.0f}", "Edad": "{:.0f}", "Item": "{:.0f}"})
 )
 
 st.dataframe(styler, use_container_width=True, hide_index=True, height=600)
