@@ -11,6 +11,7 @@ Columnas utilizadas:
 """
 
 import pandas as pd
+import plotly.graph_objects as go
 import streamlit as st
 
 # ---------------------------------------------------------------------------
@@ -41,25 +42,82 @@ st.markdown(
         .titulo-principal {{
             color: {COLOR_PRIMARIO};
             font-family: 'Nunito', sans-serif;
-            font-size: 5.5rem;
+            font-size: 3.2rem;
             font-weight: 900;
             line-height: 1.05;
-            letter-spacing: -1.5px;
+            letter-spacing: -1px;
             margin-bottom: 0.2rem;
             display: inline-block;
-            border-bottom: 8px solid {COLOR_ACENTO};
+            border-bottom: 6px solid {COLOR_ACENTO};
             padding-bottom: 0.1rem;
         }}
-        div[data-testid="stMetric"] {{
-            background-color: #F2FAF0;
-            border-left: 5px solid {COLOR_PRIMARIO};
-            border-radius: 8px;
-            padding: 12px 16px;
+
+        /* ----- Tarjetas KPI personalizadas con acento condicional ----- */
+        .kpi-card {{
+            background-color: #FFFFFF;
+            border: 1px solid #E6E6E6;
+            border-left: 7px solid #9AA0A6;
+            border-radius: 10px;
+            padding: 16px 18px;
+            height: 100%;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+        }}
+        .kpi-card .kpi-label {{
+            color: #4A4A4A;
+            font-size: 0.95rem;
+            font-weight: 700;
+            margin: 0 0 6px 0;
+            line-height: 1.2;
+        }}
+        .kpi-card .kpi-value {{
+            color: {COLOR_TEXTO};
+            font-size: 1.9rem;
+            font-weight: 900;
+            margin: 0;
+            line-height: 1.1;
+        }}
+        /* Acentos por estado */
+        .kpi-neutral {{ border-left-color: {COLOR_PRIMARIO}; }}
+        .kpi-warning {{ border-left-color: #F5A623; }}
+        .kpi-critical {{ border-left-color: #D0021B; }}
+        /* Tarjeta reina: edad promedio ponderada */
+        .kpi-reina {{
+            background: linear-gradient(135deg, #F2FAF0 0%, #FFFFFF 100%);
+            border-left: 9px solid {COLOR_PRIMARIO};
+            border-top: 1px solid {COLOR_PRIMARIO}33;
+        }}
+        .kpi-reina .kpi-label {{ color: {COLOR_PRIMARIO}; font-size: 1rem; }}
+        .kpi-reina .kpi-value {{ font-size: 2.2rem; }}
+        .kpi-crown {{
+            font-size: 0.75rem;
+            font-weight: 800;
+            color: {COLOR_ACENTO};
+            letter-spacing: 0.5px;
+            text-transform: uppercase;
+            margin: 0 0 2px 0;
         }}
     </style>
     """,
     unsafe_allow_html=True,
 )
+
+
+def tarjeta_kpi(label, value, estado="neutral", reina=False):
+    """Genera el HTML de una tarjeta KPI con acento condicional."""
+    clases = "kpi-card"
+    if reina:
+        clases += " kpi-reina"
+        corona = '<p class="kpi-crown">★ Métrica clave</p>'
+    else:
+        clases += f" kpi-{estado}"
+        corona = ""
+    return f"""
+        <div class="{clases}">
+            {corona}
+            <p class="kpi-label">{label}</p>
+            <p class="kpi-value">{value}</p>
+        </div>
+    """
 
 
 # ---------------------------------------------------------------------------
@@ -160,11 +218,89 @@ edad_prom = (
 pct_mas_6 = (und_mas_6 / inv_total * 100) if inv_total > 0 else 0
 
 k1, k2, k3, k4, k5 = st.columns(5)
-k1.metric("Inventario total (und)", f"{inv_total:,.0f}")
-k2.metric("Unidades con más de 6 días", f"{und_mas_6:,.0f}")
-k3.metric("% con más de 6 días", f"{pct_mas_6:,.1f}%")
-k4.metric("Unidades con 10+ días", f"{und_mas_10:,.0f}")
-k5.metric("Edad promedio ponderada", f"{edad_prom:,.1f} días")
+
+# Métrica reina al extremo izquierdo (lo primero que se lee)
+with k1:
+    st.markdown(
+        tarjeta_kpi("Edad promedio ponderada", f"{edad_prom:,.1f} días", reina=True),
+        unsafe_allow_html=True,
+    )
+with k2:
+    st.markdown(
+        tarjeta_kpi("Inventario total (und)", f"{inv_total:,.0f}", estado="neutral"),
+        unsafe_allow_html=True,
+    )
+with k3:
+    st.markdown(
+        tarjeta_kpi("Unidades con más de 6 días", f"{und_mas_6:,.0f}", estado="warning"),
+        unsafe_allow_html=True,
+    )
+with k4:
+    st.markdown(
+        tarjeta_kpi("% con más de 6 días", f"{pct_mas_6:,.1f}%", estado="warning"),
+        unsafe_allow_html=True,
+    )
+with k5:
+    st.markdown(
+        tarjeta_kpi("Unidades con 10+ días", f"{und_mas_10:,.0f}", estado="critical"),
+        unsafe_allow_html=True,
+    )
+
+st.divider()
+
+
+# ---------------------------------------------------------------------------
+# HISTOGRAMA DE DISTRIBUCIÓN DE INVENTARIO POR EDAD
+# ---------------------------------------------------------------------------
+st.subheader("Distribución del inventario por edad")
+
+# Agrupa cantidad por edad; agrupa 10+ en una sola barra
+dist = dff.dropna(subset=["edad"]).copy()
+dist["edad_int"] = dist["edad"].astype(int)
+dist["bucket"] = dist["edad_int"].apply(lambda x: "10+" if x >= 10 else str(x))
+
+# Orden correcto del eje X
+orden_buckets = [str(i) for i in range(0, 10)] + ["10+"]
+serie = (
+    dist.groupby("bucket")["cantidad"].sum()
+    .reindex(orden_buckets, fill_value=0)
+)
+
+
+def color_barra(bucket):
+    if bucket == "10+":
+        return "#D0021B"          # rojo crítico
+    val = int(bucket)
+    if val <= 5:
+        return COLOR_PRIMARIO     # verde óptimo
+    elif val <= 9:
+        return "#F5A623"          # amarillo/naranja advertencia
+    return "#D0021B"
+
+
+colores = [color_barra(b) for b in serie.index]
+
+fig = go.Figure(
+    go.Bar(
+        x=list(serie.index),
+        y=serie.values,
+        marker_color=colores,
+        text=[f"{v:,.0f}" if v > 0 else "" for v in serie.values],
+        textposition="outside",
+        hovertemplate="Edad: %{x} días<br>Cantidad: %{y:,.0f} und<extra></extra>",
+    )
+)
+fig.update_layout(
+    height=360,
+    margin=dict(l=10, r=10, t=10, b=10),
+    plot_bgcolor="rgba(0,0,0,0)",
+    paper_bgcolor="rgba(0,0,0,0)",
+    font=dict(family="Nunito, sans-serif", size=13),
+    xaxis=dict(title="Días de edad del producto", tickmode="linear"),
+    yaxis=dict(title="Unidades", showgrid=True, gridcolor="#EEEEEE"),
+    bargap=0.25,
+)
+st.plotly_chart(fig, use_container_width=True)
 
 st.divider()
 
@@ -197,17 +333,19 @@ tabla = tabla.rename(
 
 
 def color_edad(val):
-    """Semáforo por rango de edad."""
+    """Semáforo por rango de edad, con intensidad creciente."""
     try:
         v = float(val)
     except (TypeError, ValueError):
         return ""
     if 1 <= v <= 5:
-        return "background-color: #C6EFCE; color: #006100;"   # verde claro - óptimo
-    elif 6 <= v <= 9:
-        return "background-color: #FFEB9C; color: #9C6500;"    # amarillo - preocupante
+        return "background-color: #C6EFCE; color: #006100; font-weight: 700;"   # verde - óptimo
+    elif v == 6:
+        return "background-color: #FFE08A; color: #7A5200; font-weight: 700;"    # amarillo
+    elif 7 <= v <= 9:
+        return "background-color: #FFB84D; color: #7A3E00; font-weight: 800;"    # naranja vivo (día 7+)
     elif v >= 10:
-        return "background-color: #FFC7CE; color: #9C0006;"    # rojo - preocupante
+        return "background-color: #FF8A80; color: #7A0006; font-weight: 800;"    # rojo claro - crítico
     return ""
 
 
@@ -218,6 +356,13 @@ if "Item" in tabla.columns:
 styler = (
     tabla.style
     .map(color_edad, subset=["Edad"])
+    .bar(
+        subset=["Suma de Cantidad"],
+        color="#BFE3B5",          # verde Kikes suave para las barras de datos
+        align="left",
+        height=70,
+        vmin=0,
+    )
     .format({"Suma de Cantidad": "{:,.0f}", "Edad": "{:.0f}", "Item": "{:.0f}"})
 )
 
@@ -227,7 +372,8 @@ st.dataframe(styler, use_container_width=True, hide_index=True, height=600)
 st.markdown(
     """
     **Convención de edades:**
-    🟢 1–5 días: óptimo &nbsp;&nbsp; 🟡 6–9 días: preocupante &nbsp;&nbsp; 🔴 10+ días: crítico
+    🟢 1–5 días: óptimo &nbsp;&nbsp; 🟡 6 días: alerta &nbsp;&nbsp; 🟠 7–9 días: preocupante &nbsp;&nbsp; 🔴 10+ días: crítico
+    &nbsp;&nbsp;|&nbsp;&nbsp; Las barras en *Suma de Cantidad* son proporcionales al volumen de cada fila.
     """
 )
 
