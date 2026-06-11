@@ -41,9 +41,14 @@ st.markdown(
         .titulo-principal {{
             color: {COLOR_PRIMARIO};
             font-family: 'Nunito', sans-serif;
-            font-size: 3.4rem;
+            font-size: 5.5rem;
             font-weight: 900;
-            margin-bottom: 0.4rem;
+            line-height: 1.05;
+            letter-spacing: -1.5px;
+            margin-bottom: 0.2rem;
+            display: inline-block;
+            border-bottom: 8px solid {COLOR_ACENTO};
+            padding-bottom: 0.1rem;
         }}
         div[data-testid="stMetric"] {{
             background-color: #F2FAF0;
