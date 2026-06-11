@@ -42,14 +42,14 @@ st.markdown(
         .titulo-principal {{
             color: {COLOR_PRIMARIO};
             font-family: 'Nunito', sans-serif;
-            font-size: 3.2rem;
+            font-size: 4.2rem;
             font-weight: 900;
             line-height: 1.05;
-            letter-spacing: -1px;
+            letter-spacing: -1.5px;
             margin-bottom: 0.2rem;
             display: inline-block;
-            border-bottom: 6px solid {COLOR_ACENTO};
-            padding-bottom: 0.1rem;
+            border-bottom: 7px solid {COLOR_ACENTO};
+            padding-bottom: 0.15rem;
         }}
 
         /* ----- Tarjetas KPI personalizadas con acento condicional ----- */
@@ -111,13 +111,11 @@ def tarjeta_kpi(label, value, estado="neutral", reina=False):
     else:
         clases += f" kpi-{estado}"
         corona = ""
-    return f"""
-        <div class="{clases}">
-            {corona}
-            <p class="kpi-label">{label}</p>
-            <p class="kpi-value">{value}</p>
-        </div>
-    """
+    return (
+        f'<div class="{clases}">{corona}'
+        f'<p class="kpi-label">{label}</p>'
+        f'<p class="kpi-value">{value}</p></div>'
+    )
 
 
 # ---------------------------------------------------------------------------
