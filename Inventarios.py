@@ -837,18 +837,18 @@ def render_modulo_rotacion():
                 return "background-color:#FF8A80; color:#7A0006; font-weight:800;"
 
             def resalta_varado(row):
-                if row["_varado"]:
-                    return ["background-color:#FDEDEC;"] * len(row)
-                return [""] * len(row)
+                # 'row' incluye la columna _varado; devolvemos un estilo por columna.
+                base = "background-color:#FDEDEC;" if row["_varado"] else ""
+                return [base] * len(row)
 
-            vista = tabla.drop(columns=["_varado"])
             styler = (
-                vista.style
-                .apply(lambda row: resalta_varado(tabla.loc[row.name]), axis=1)
+                tabla.style
+                .apply(resalta_varado, axis=1)
                 .map(color_edad, subset=["Edad (días)"])
                 .format({"Cantidad ayer": "{:,.0f}", "Cantidad hoy": "{:,.0f}",
                          "Vendido (item)": lambda v: f"{v:,.0f}" if v else "—",
                          "Item": "{:.0f}", "Edad (días)": "{:.0f}"})
+                .hide(axis="columns", subset=["_varado"])
             )
             st.dataframe(styler, use_container_width=True, hide_index=True, height=600)
             st.markdown(
@@ -856,7 +856,7 @@ def render_modulo_rotacion():
                 "&nbsp;&nbsp;|&nbsp;&nbsp; Filas con fondo rojo claro = lote viejo varado.  "
                 "*Vendido* se muestra una vez por item."
             )
-            st.caption(f"{len(vista):,} lotes mostrados.")
+            st.caption(f"{len(tabla):,} lotes mostrados.")
 
     st.caption(
         f"Fuentes: {ARCHIVO_AYER} (inicial ayer) · {ARCHIVO_VENTAS} (ventas del período) · "
