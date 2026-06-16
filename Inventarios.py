@@ -114,14 +114,6 @@ st.markdown(
         }}
         .kpi-reina .kpi-label {{ color: {COLOR_PRIMARIO}; font-size: 1rem; }}
         .kpi-reina .kpi-value {{ font-size: 2.2rem; }}
-        .kpi-crown {{
-            font-size: 0.75rem;
-            font-weight: 800;
-            color: {COLOR_ACENTO};
-            letter-spacing: 0.5px;
-            text-transform: uppercase;
-            margin: 0 0 2px 0;
-        }}
     </style>
     """,
     unsafe_allow_html=True,
@@ -133,12 +125,10 @@ def tarjeta_kpi(label, value, estado="neutral", reina=False):
     clases = "kpi-card"
     if reina:
         clases += " kpi-reina"
-        corona = '<p class="kpi-crown">★ Métrica clave</p>'
     else:
         clases += f" kpi-{estado}"
-        corona = ""
     return (
-        f'<div class="{clases}">{corona}'
+        f'<div class="{clases}">'
         f'<p class="kpi-label">{label}</p>'
         f'<p class="kpi-value">{value}</p></div>'
     )
@@ -727,10 +717,17 @@ def render_modulo_rotacion():
                 st.caption(
                     f"Cada fila sigue un **lote** desde su edad de ayer hasta hoy (envejece +{dias} día(s)). "
                     f"**Teórico PEPS** = lo que debería quedar de ese lote si rotara bien; "
-                    f"**Real** = lo observado hoy a esa edad. Venta del período: "
-                    f"**{r['vendido']:,.0f} unds**. La reconstrucción por lote es un modelo PEPS "
+                    f"**Real** = lo observado hoy a esa edad. La reconstrucción por lote es un modelo PEPS "
                     "(el inventario no etiqueta lotes individuales)."
                 )
+
+                # Venta del período como KPI destacado
+                kv1, kv2 = st.columns([1, 2])
+                with kv1:
+                    st.markdown(
+                        tarjeta_kpi("Venta del período", f"{r['vendido']:,.0f} unds", reina=True),
+                        unsafe_allow_html=True,
+                    )
 
                 # --- SECCIÓN 1: Lotes que ya existían ayer (su evolución) ---
                 edades_ayer = sorted(r["vec_ayer"].keys(), reverse=True)
