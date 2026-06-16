@@ -714,7 +714,7 @@ def render_modulo_rotacion():
             )
             st.dataframe(styler, use_container_width=True, hide_index=True)
 
-            st.markdown("##### Detalle por edad de la ruptura seleccionada")
+            st.markdown("##### Detalle por lote de la ruptura seleccionada")
             opciones_rup = [
                 f"{r.destino} — {int(r.item) if str(r.item).isdigit() else r.item} — {r.referencia}"
                 for r in rupturas.sort_values("unds_varadas", ascending=False).itertuples()
@@ -724,48 +724,86 @@ def render_modulo_rotacion():
                 idx = opciones_rup.index(sel)
                 r = rupturas.sort_values("unds_varadas", ascending=False).iloc[idx]
 
-                # Edades presentes en cualquiera de los dos días (sin envejecer):
-                # 'cant ayer' usa el inventario inicial de ayer tal cual;
-                # 'cant hoy' usa el inventario real de hoy.
-                edades = sorted(set(r["vec_ayer"]) | set(r["vec_real"]))
-                det = pd.DataFrame({
-                    "Edad (días)": edades,
-                    "Cantidad ayer": [r["vec_ayer"].get(e, 0) for e in edades],
-                    "Cantidad hoy": [r["vec_real"].get(e, 0) for e in edades],
-                })
-                # Marca de lote viejo varado (según la lógica PEPS de la ventana)
-                det["Marca"] = [
-                    "VARADO" if (e > r["edad_max_teorica"] and r["vec_real"].get(e, 0) > 0
-                                 and r["vendido"] < r["cant_ayer"]) else ""
-                    for e in edades
-                ]
-                # Fila de totales con la venta del período (la venta no tiene edad: va al total)
-                total = pd.DataFrame({
-                    "Edad (días)": ["TOTAL"],
-                    "Cantidad ayer": [r["cant_ayer"]],
-                    "Cantidad hoy": [r["cant_hoy"]],
-                    "Marca": [""],
-                })
-                det = pd.concat([det, total], ignore_index=True)
-
                 st.caption(
-                    f"**Edad ayer / edad hoy** = días de cada lote en su respectivo corte.  "
-                    f"**Venta del período: {r['vendido']:,.0f} unds** (sale por código, no por lote, "
-                    "por eso se reporta sobre el total)."
+                    f"Cada fila sigue un **lote** desde su edad de ayer hasta hoy (envejece +{dias} día(s)). "
+                    f"**Teórico PEPS** = lo que debería quedar de ese lote si rotara bien; "
+                    f"**Real** = lo observado hoy a esa edad. Venta del período: "
+                    f"**{r['vendido']:,.0f} unds**. La reconstrucción por lote es un modelo PEPS "
+                    "(el inventario no etiqueta lotes individuales)."
                 )
 
-                def marca_fila(row):
-                    if row["Marca"] == "VARADO":
-                        return ["background-color:#FFE08A; font-weight:700;"] * len(row)
-                    if row["Edad (días)"] == "TOTAL":
-                        return ["border-top:2px solid #9AA0A6; font-weight:800;"] * len(row)
-                    return [""] * len(row)
+                # --- SECCIÓN 1: Lotes que ya existían ayer (su evolución) ---
+                edades_ayer = sorted(r["vec_ayer"].keys(), reverse=True)
+                filas_lote = []
+                for e in edades_ayer:
+                    e_hoy = e + dias                      # edad de ese lote hoy
+                    c_ayer = r["vec_ayer"].get(e, 0)
+                    c_teo = r["vec_teorico"].get(e_hoy, 0)    # lo que PEPS dejaría
+                    c_real = r["vec_real"].get(e_hoy, 0)      # lo observado a esa edad envejecida
+                    es_varado = (e_hoy > r["edad_max_teorica"] and c_real > 0
+                                 and r["vendido"] < r["cant_ayer"])
+                    # Lectura en lenguaje de negocio
+                    if es_varado:
+                        estado = "⚠️ Varado (debió salir)"
+                    elif c_real <= 0.5 and c_ayer > 0:
+                        estado = "✅ Rotó completo"
+                    elif c_real < c_ayer - 0.5:
+                        estado = "🔄 Rotó parcial"
+                    else:
+                        estado = "• En stock"
+                    filas_lote.append({
+                        "Lote (edad ayer → hoy)": f"{e}d → {e_hoy}d",
+                        "Cantidad ayer": c_ayer,
+                        "Teórico hoy (PEPS)": c_teo,
+                        "Real hoy": c_real,
+                        "Estado del lote": estado,
+                        "_varado": es_varado,
+                    })
+                df_lotes = pd.DataFrame(filas_lote)
 
-                det_styler = (
-                    det.style.apply(marca_fila, axis=1)
-                    .format({"Cantidad ayer": "{:,.0f}", "Cantidad hoy": "{:,.0f}"})
+                def estilo_lote(row):
+                    base = "background-color:#FFE08A; font-weight:700;" if row["_varado"] else ""
+                    return [base] * len(row)
+
+                st.markdown("**Lotes que venían de ayer**")
+                styler_lotes = (
+                    df_lotes.style
+                    .apply(estilo_lote, axis=1)
+                    .format({"Cantidad ayer": "{:,.0f}", "Teórico hoy (PEPS)": "{:,.0f}",
+                             "Real hoy": "{:,.0f}"})
+                    .hide(axis="columns", subset=["_varado"])
                 )
-                st.dataframe(det_styler, use_container_width=True, hide_index=True)
+                st.dataframe(styler_lotes, use_container_width=True, hide_index=True)
+
+                # --- SECCIÓN 2: Entradas nuevas del período ---
+                # Edades reales hoy que NO corresponden a ninguna cohorte de ayer
+                edades_cohorte = {e + dias for e in r["vec_ayer"].keys()}
+                filas_nuevas = []
+                for e_hoy in sorted(r["vec_real"].keys()):
+                    if e_hoy not in edades_cohorte:
+                        filas_nuevas.append({
+                            "Edad hoy": f"{e_hoy}d",
+                            "Cantidad hoy": r["vec_real"].get(e_hoy, 0),
+                        })
+                if filas_nuevas:
+                    df_nuevas = pd.DataFrame(filas_nuevas)
+                    st.markdown("**Entradas nuevas del período** (producto que no existía ayer)")
+                    st.dataframe(
+                        df_nuevas.style.format({"Cantidad hoy": "{:,.0f}"}),
+                        use_container_width=True, hide_index=True,
+                    )
+
+                # --- Resumen de cuadre ---
+                c1, c2, c3 = st.columns(3)
+                with c1:
+                    st.markdown(tarjeta_kpi("Inv. ayer", f"{r['cant_ayer']:,.0f}", estado="neutral"),
+                                unsafe_allow_html=True)
+                with c2:
+                    st.markdown(tarjeta_kpi("Vendido", f"{r['vendido']:,.0f}", estado="neutral"),
+                                unsafe_allow_html=True)
+                with c3:
+                    st.markdown(tarjeta_kpi("Inv. hoy", f"{r['cant_hoy']:,.0f}", estado="neutral"),
+                                unsafe_allow_html=True)
 
     # ===== TAB 2: DETALLE POR DESTINO — UNA FILA POR LOTE (destino+item+edad) =====
     with tab2:
