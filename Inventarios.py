@@ -778,12 +778,15 @@ def render_modulo_rotacion():
                 # --- SECCIÓN 2: Entradas nuevas del período ---
                 # Edades reales hoy que NO corresponden a ninguna cohorte de ayer
                 edades_cohorte = {e + dias for e in r["vec_ayer"].keys()}
+                edad_max_cohorte = max(edades_cohorte) if edades_cohorte else dias
                 filas_nuevas = []
                 for e_hoy in sorted(r["vec_real"].keys()):
                     if e_hoy not in edades_cohorte:
+                        anomala = e_hoy > edad_max_cohorte
                         filas_nuevas.append({
-                            "Edad hoy": f"{e_hoy}d",
+                            "Edad hoy": f"⁉️ {e_hoy}d (reaparecido)" if anomala else f"{e_hoy}d",
                             "Cantidad hoy": r["vec_real"].get(e_hoy, 0),
+                            "Nota": "Más viejo de lo posible: revisar reingreso/conteo" if anomala else "",
                         })
                 if filas_nuevas:
                     df_nuevas = pd.DataFrame(filas_nuevas)
@@ -793,25 +796,13 @@ def render_modulo_rotacion():
                         use_container_width=True, hide_index=True,
                     )
 
-                # --- Resumen de cuadre ---
-                c1, c2, c3 = st.columns(3)
-                with c1:
-                    st.markdown(tarjeta_kpi("Inv. ayer", f"{r['cant_ayer']:,.0f}", estado="neutral"),
-                                unsafe_allow_html=True)
-                with c2:
-                    st.markdown(tarjeta_kpi("Vendido", f"{r['vendido']:,.0f}", estado="neutral"),
-                                unsafe_allow_html=True)
-                with c3:
-                    st.markdown(tarjeta_kpi("Inv. hoy", f"{r['cant_hoy']:,.0f}", estado="neutral"),
-                                unsafe_allow_html=True)
-
-    # ===== TAB 2: DETALLE POR DESTINO — UNA FILA POR LOTE (destino+item+edad) =====
+    # ===== TAB 2: DETALLE POR DESTINO — UNA FILA POR LOTE (cohorte ayer → hoy) =====
     with tab2:
-        st.subheader("Detalle por destino — ayer vs hoy, por lote")
+        st.subheader("Detalle por destino — seguimiento por lote")
         st.caption(
-            "Una fila por cada lote (destino · item · edad), con la edad de cada registro tal como "
-            "está en el inventario. La venta sale por código (no por lote), por eso se reporta a nivel "
-            "de item, no repetida en cada edad."
+            f"Cada fila sigue un **lote** desde su edad de ayer hasta hoy (envejece +{dias} día(s)). "
+            "Los lotes que venían de ayer muestran su evolución; las entradas nuevas del período "
+            "aparecen marcadas aparte. La reconstrucción por lote es un modelo PEPS."
         )
 
         destinos = sorted(res["destino"].unique().tolist())
@@ -827,72 +818,86 @@ def render_modulo_rotacion():
         if solo_rup:
             sub = sub[sub["ruptura"]]
 
-        # Explota a nivel de lote: por cada (destino, item) recorre las edades de ayer y hoy.
-        # La venta se muestra una sola vez por item (en la edad más vieja del registro),
-        # para no inflar el total al sumar la columna.
+        # Explota a nivel de lote/cohorte: por cada (destino, item) seguimos los lotes
+        # de ayer (edad ayer -> edad hoy = ayer + dias) y, aparte, las entradas nuevas.
         registros = []
         for r in sub.itertuples():
-            edades = sorted(set(r.vec_ayer) | set(r.vec_real))
-            if not edades:
-                continue
-            edad_marca_venta = max(edades)  # ancla para mostrar la venta una sola vez
-            for e in edades:
+            edades_cohorte = {e + dias for e in r.vec_ayer.keys()}
+            # 1) Lotes que venían de ayer
+            for e in sorted(r.vec_ayer.keys(), reverse=True):
+                e_hoy = e + dias
                 c_ayer = r.vec_ayer.get(e, 0)
-                c_hoy = r.vec_real.get(e, 0)
-                es_varado = (e > r.edad_max_teorica and c_hoy > 0
+                c_teo = r.vec_teorico.get(e_hoy, 0)
+                c_real = r.vec_real.get(e_hoy, 0)
+                es_varado = (e_hoy > r.edad_max_teorica and c_real > 0
                              and r.vendido < r.cant_ayer and r.ruptura)
+                if es_varado:
+                    estado = "⚠️ Varado"
+                elif c_real <= 0.5 and c_ayer > 0:
+                    estado = "✅ Rotó completo"
+                elif c_real < c_ayer - 0.5:
+                    estado = "🔄 Rotó parcial"
+                else:
+                    estado = "• En stock"
                 registros.append({
                     "Destino": r.destino,
                     "Item": int(r.item) if str(r.item).isdigit() else r.item,
                     "Referencia": r.referencia,
-                    "Edad (días)": e,
-                    "Cantidad ayer": c_ayer,
-                    "Cantidad hoy": c_hoy,
-                    "Vendido (item)": r.vendido if e == edad_marca_venta else 0,
-                    "_varado": es_varado,
+                    "Lote (ayer → hoy)": f"{e}d → {e_hoy}d",
+                    "Cant. ayer": c_ayer,
+                    "Teórico hoy": c_teo,
+                    "Real hoy": c_real,
+                    "Estado": estado,
+                    "_orden": 0, "_varado": es_varado,
                 })
+            # 2) Entradas nuevas del período (edades reales que no vienen de ayer)
+            edad_max_cohorte = max(edades_cohorte) if edades_cohorte else dias
+            for e_hoy in sorted(r.vec_real.keys()):
+                if e_hoy not in edades_cohorte:
+                    c_real = r.vec_real.get(e_hoy, 0)
+                    # Una "entrada nueva" más vieja que cualquier cohorte posible de ayer
+                    # no puede ser producto fresco: es una reaparición anómala.
+                    anomala = e_hoy > edad_max_cohorte and r.ruptura
+                    registros.append({
+                        "Destino": r.destino,
+                        "Item": int(r.item) if str(r.item).isdigit() else r.item,
+                        "Referencia": r.referencia,
+                        "Lote (ayer → hoy)": f"⁉️ {e_hoy}d (reaparecido)" if anomala else f"nuevo → {e_hoy}d",
+                        "Cant. ayer": 0,
+                        "Teórico hoy": 0,
+                        "Real hoy": c_real,
+                        "Estado": "⚠️ Reaparecido (anómalo)" if anomala else "🆕 Entrada nueva",
+                        "_orden": 1, "_varado": anomala,
+                    })
 
         if not registros:
             st.info("No hay registros para los filtros seleccionados.")
         else:
             tabla = pd.DataFrame(registros).sort_values(
-                ["Destino", "Item", "Edad (días)"], ascending=[True, True, False]
+                ["Destino", "Item", "_orden", "Lote (ayer → hoy)"],
+                ascending=[True, True, True, False]
             ).reset_index(drop=True)
 
-            def color_edad(val):
-                try:
-                    v = float(val)
-                except (TypeError, ValueError):
-                    return ""
-                if v <= 0:
-                    return ""
-                if v <= 5:
-                    return "background-color:#C6EFCE; color:#006100; font-weight:700;"
-                elif v <= 6:
-                    return "background-color:#FFE08A; color:#7A5200; font-weight:700;"
-                elif v <= 9:
-                    return "background-color:#FFB84D; color:#7A3E00; font-weight:800;"
-                return "background-color:#FF8A80; color:#7A0006; font-weight:800;"
+            def estilo_fila(row):
+                if row["_varado"]:
+                    return ["background-color:#FDEDEC;"] * len(row)
+                if row["Estado"] == "🆕 Entrada nueva":
+                    return ["background-color:#F4F9F2; color:#4A4A4A;"] * len(row)
+                return [""] * len(row)
 
-            def resalta_varado(row):
-                # 'row' incluye la columna _varado; devolvemos un estilo por columna.
-                base = "background-color:#FDEDEC;" if row["_varado"] else ""
-                return [base] * len(row)
-
+            vista_cols = ["Destino", "Item", "Referencia", "Lote (ayer → hoy)",
+                          "Cant. ayer", "Teórico hoy", "Real hoy", "Estado", "_varado"]
             styler = (
-                tabla.style
-                .apply(resalta_varado, axis=1)
-                .map(color_edad, subset=["Edad (días)"])
-                .format({"Cantidad ayer": "{:,.0f}", "Cantidad hoy": "{:,.0f}",
-                         "Vendido (item)": lambda v: f"{v:,.0f}" if v else "—",
-                         "Item": "{:.0f}", "Edad (días)": "{:.0f}"})
+                tabla[vista_cols].style
+                .apply(estilo_fila, axis=1)
+                .format({"Cant. ayer": "{:,.0f}", "Teórico hoy": "{:,.0f}",
+                         "Real hoy": "{:,.0f}", "Item": "{:.0f}"})
                 .hide(axis="columns", subset=["_varado"])
             )
             st.dataframe(styler, use_container_width=True, hide_index=True, height=600)
             st.markdown(
-                "🟢 ≤5 días &nbsp;&nbsp; 🟡 6 días &nbsp;&nbsp; 🟠 7–9 días &nbsp;&nbsp; 🔴 10+ días "
-                "&nbsp;&nbsp;|&nbsp;&nbsp; Filas con fondo rojo claro = lote viejo varado.  "
-                "*Vendido* se muestra una vez por item."
+                "**Teórico hoy** = lo que PEPS dejaría de ese lote · **Real hoy** = lo observado.  "
+                "⚠️ Varado (fondo rojo) = lote viejo que debió salir · 🆕 entradas nuevas en gris."
             )
             st.caption(f"{len(tabla):,} lotes mostrados.")
 
