@@ -431,6 +431,23 @@ def leer_inventario(ruta: str, hoja: str) -> pd.DataFrame:
 
 
 @st.cache_data(ttl=3600)
+def leer_fecha_corte(ruta: str, hoja: str):
+    """Lee la fecha de corte más reciente del inventario (columna 'Fecha').
+
+    Se mantiene separada de leer_inventario porque st.cache_data no preserva
+    de forma fiable los atributos (df.attrs) al serializar el DataFrame.
+    """
+    df = pd.read_excel(ruta, sheet_name=hoja, usecols=None)
+    df.columns = [str(c).strip().lower() for c in df.columns]
+    if "fecha" not in df.columns:
+        return None
+    fechas = pd.to_datetime(df["fecha"], errors="coerce").dropna()
+    if fechas.empty:
+        return None
+    return fechas.max().normalize()
+
+
+@st.cache_data(ttl=3600)
 def leer_ventas(ruta: str) -> pd.DataFrame:
     """Lee ventas, filtra línea HU y mapea bodega->destino."""
     raw = pd.read_excel(ruta, sheet_name=0)
@@ -474,8 +491,14 @@ def peps_consumir(inv_envejecido, vendido):
 
 
 @st.cache_data(ttl=3600)
-def construir_analisis(inv_ayer, inv_hoy, ventas):
-    """Motor PEPS. Devuelve (resultados_df, ventas_no_mapeadas_df)."""
+def construir_analisis(inv_ayer, inv_hoy, ventas, dias=1):
+    """Motor PEPS consciente de los días transcurridos.
+
+    'dias' es el número de días entre el corte de inv_ayer y el de inv_hoy
+    (1 en un día normal; 3 tras un puente). Cada lote del inventario inicial
+    se envejece +dias antes de consumir las ventas por PEPS.
+    """
+    dias = max(1, int(dias))
     ven_ok = ventas.dropna(subset=["destino"])
     ven_map = ven_ok.groupby(["destino", "item"])["cantidad"].sum().to_dict()
 
@@ -496,7 +519,7 @@ def construir_analisis(inv_ayer, inv_hoy, ventas):
 
         va_env = defaultdict(float)
         for e, c in va.items():
-            va_env[e + 1] += c
+            va_env[e + dias] += c
         teorico, faltante = peps_consumir(va_env, vendido)
 
         edad_max_teorica = max(teorico.keys()) if teorico else (max(va_env.keys()) if va_env else 0)
@@ -524,15 +547,16 @@ def construir_analisis(inv_ayer, inv_hoy, ventas):
         ep_ayer = edad_ponderada(va)
         ruptura = (varado > 0.5) and (vendido > 0)
 
-        # Diagnóstico textual
+        # Diagnóstico textual. Con una ventana de 'dias', un lote puede envejecer
+        # legítimamente hasta +dias; solo un salto MAYOR a eso es anómalo.
         edades_real = list(vh.keys())
         edad_max_real = max(edades_real) if edades_real else 0
-        salto = edad_max_real - edad_mas_vieja_ayer
+        salto = edad_max_real - (edad_mas_vieja_ayer - dias)  # edad original más vieja de ayer
         if not ruptura:
             diag = ""
-        elif salto >= 2:
-            diag = (f"Apareció lote de {edad_max_real}d (imposible por envejecimiento normal): "
-                    "posible reingreso/devolución o conteo inconsistente")
+        elif edad_max_real > edad_mas_vieja_ayer:
+            diag = (f"Apareció lote de {edad_max_real}d, más viejo de lo posible incluso tras "
+                    f"{dias} día(s) de envejecimiento: posible reingreso/devolución o conteo inconsistente")
         elif teorico and edad_max_real > max(teorico.keys()):
             diag = "Lote viejo no rotó: salió producto más nuevo dejando varado el antiguo"
         else:
@@ -549,7 +573,7 @@ def construir_analisis(inv_ayer, inv_hoy, ventas):
             "unds_varadas": round(varado, 0),
             "faltante_peps": round(faltante, 0),
             "ruptura": ruptura, "diagnostico": diag,
-            "vec_teorico": dict(teorico), "vec_real": dict(vh),
+            "vec_ayer": dict(va), "vec_teorico": dict(teorico), "vec_real": dict(vh),
             "edad_mas_vieja_ayer": edad_mas_vieja_ayer,
         })
 
@@ -563,9 +587,9 @@ def construir_analisis(inv_ayer, inv_hoy, ventas):
 def render_modulo_rotacion():
     st.markdown('<p class="titulo-modulo">🔄 Análisis de Rotación PEPS</p>', unsafe_allow_html=True)
     st.caption(
-        "Compara el inventario inicial de ayer + ventas del día contra el inventario inicial de hoy. "
-        "Lógica: se envejece +1 día cada lote de ayer, se consume la venta por PEPS (más viejo primero) "
-        "y se contrasta contra el inventario real de hoy."
+        "Compara el inventario inicial de ayer + ventas del período contra el inventario inicial de hoy. "
+        "Lógica: se envejece cada lote según los días transcurridos entre cortes, se consume la venta por "
+        "PEPS (más viejo primero) y se contrasta contra el inventario real de hoy."
     )
     st.divider()
 
@@ -592,8 +616,44 @@ def render_modulo_rotacion():
         )
         st.stop()
 
-    res, no_map = construir_analisis(inv_ayer, inv_hoy, ventas)
+    # --- Días transcurridos entre el corte de ayer y el de hoy ---
+    f_ayer = leer_fecha_corte(ARCHIVO_AYER, HOJA_INV_ANALISIS)
+    f_hoy = leer_fecha_corte(ARCHIVO_HOY, HOJA_INV_ANALISIS)
+    dias = 1
+    fechas_ok = (f_ayer is not None) and (f_hoy is not None)
+    if fechas_ok:
+        dias = int((f_hoy - f_ayer).days)
+
+    # Validaciones de la ventana antes de correr el motor
+    if fechas_ok and dias <= 0:
+        st.error(
+            f"Las fechas de corte no son válidas para el análisis: "
+            f"**Ayer = {f_ayer.date()}**, **Hoy = {f_hoy.date()}**. "
+            "El inventario de hoy debe tener una fecha de corte posterior a la de ayer. "
+            "Revisa que no hayas intercambiado los archivos."
+        )
+        st.stop()
+
+    if not fechas_ok:
+        st.warning(
+            "No pude leer la fecha de corte de uno de los inventarios (columna *Fecha*). "
+            "Asumiré **1 día** de diferencia; si vienes de un puente, los resultados no serán confiables."
+        )
+
+    res, no_map = construir_analisis(inv_ayer, inv_hoy, ventas, dias=dias)
     rupturas = res[res["ruptura"]]
+
+    # Aviso de ventana multi-día
+    if dias > 1:
+        rango = ""
+        if fechas_ok:
+            rango = f" (corte {f_ayer.date()} → {f_hoy.date()})"
+        st.warning(
+            f"**Ventana de {dias} días{rango}.** El inventario se envejeció +{dias} días y las ventas "
+            "del archivo se consumieron de forma agregada. El análisis indica **si hubo ruptura** en la "
+            "ventana completa, no en qué día ocurrió. En ventanas largas, las alertas de *lote reaparecido* "
+            "deben leerse con más cautela, ya que el envejecimiento normal acerca las edades al umbral."
+        )
 
     # --- KPIs ---
     cob = ventas.dropna(subset=["destino"])["cantidad"].sum() / ventas["cantidad"].sum() * 100 \
@@ -619,8 +679,8 @@ def render_modulo_rotacion():
     st.divider()
 
     # ----- Sub-secciones por pestañas -----
-    tab1, tab2, tab3 = st.tabs(
-        ["🚨 Rupturas PEPS", "📋 Balance por destino", "🔎 Seguimiento ayer vs hoy"]
+    tab1, tab2 = st.tabs(
+        ["🚨 Rupturas PEPS", "📋 Detalle por destino (ayer vs hoy)"]
     )
 
     # ===== TAB 1: RUPTURAS PEPS =====
@@ -663,146 +723,143 @@ def render_modulo_rotacion():
             if sel:
                 idx = opciones_rup.index(sel)
                 r = rupturas.sort_values("unds_varadas", ascending=False).iloc[idx]
-                edades = sorted(set(r["vec_teorico"]) | set(r["vec_real"]))
+
+                # Edades presentes en cualquiera de los dos días (sin envejecer):
+                # 'cant ayer' usa el inventario inicial de ayer tal cual;
+                # 'cant hoy' usa el inventario real de hoy.
+                edades = sorted(set(r["vec_ayer"]) | set(r["vec_real"]))
                 det = pd.DataFrame({
                     "Edad (días)": edades,
-                    "Teórico PEPS": [r["vec_teorico"].get(e, 0) for e in edades],
-                    "Real hoy": [r["vec_real"].get(e, 0) for e in edades],
+                    "Cantidad ayer": [r["vec_ayer"].get(e, 0) for e in edades],
+                    "Cantidad hoy": [r["vec_real"].get(e, 0) for e in edades],
                 })
-                det["Diferencia"] = det["Real hoy"] - det["Teórico PEPS"]
+                # Marca de lote viejo varado (según la lógica PEPS de la ventana)
                 det["Marca"] = [
                     "VARADO" if (e > r["edad_max_teorica"] and r["vec_real"].get(e, 0) > 0
                                  and r["vendido"] < r["cant_ayer"]) else ""
                     for e in edades
                 ]
+                # Fila de totales con la venta del período (la venta no tiene edad: va al total)
+                total = pd.DataFrame({
+                    "Edad (días)": ["TOTAL"],
+                    "Cantidad ayer": [r["cant_ayer"]],
+                    "Cantidad hoy": [r["cant_hoy"]],
+                    "Marca": [""],
+                })
+                det = pd.concat([det, total], ignore_index=True)
+
+                st.caption(
+                    f"**Edad ayer / edad hoy** = días de cada lote en su respectivo corte.  "
+                    f"**Venta del período: {r['vendido']:,.0f} unds** (sale por código, no por lote, "
+                    "por eso se reporta sobre el total)."
+                )
 
                 def marca_fila(row):
                     if row["Marca"] == "VARADO":
                         return ["background-color:#FFE08A; font-weight:700;"] * len(row)
+                    if row["Edad (días)"] == "TOTAL":
+                        return ["border-top:2px solid #9AA0A6; font-weight:800;"] * len(row)
                     return [""] * len(row)
 
                 det_styler = (
                     det.style.apply(marca_fila, axis=1)
-                    .format({"Teórico PEPS": "{:,.0f}", "Real hoy": "{:,.0f}", "Diferencia": "{:,.0f}"})
+                    .format({"Cantidad ayer": "{:,.0f}", "Cantidad hoy": "{:,.0f}"})
                 )
                 st.dataframe(det_styler, use_container_width=True, hide_index=True)
 
-    # ===== TAB 2: BALANCE POR DESTINO (filtrable) =====
+    # ===== TAB 2: DETALLE POR DESTINO — UNA FILA POR LOTE (destino+item+edad) =====
     with tab2:
-        st.subheader("Balance completo por destino")
-        st.caption("Todas las combinaciones con venta registrada. Filtra por destino para revisar uno a la vez.")
+        st.subheader("Detalle por destino — ayer vs hoy, por lote")
+        st.caption(
+            "Una fila por cada lote (destino · item · edad), con la edad de cada registro tal como "
+            "está en el inventario. La venta sale por código (no por lote), por eso se reporta a nivel "
+            "de item, no repetida en cada edad."
+        )
 
         destinos = sorted(res["destino"].unique().tolist())
         cfilt1, cfilt2 = st.columns([2, 1])
         with cfilt1:
             f_dest = st.multiselect("Destino (CEDI/Planta)", destinos, placeholder="Todos")
         with cfilt2:
-            solo_rup = st.toggle("Solo rupturas", value=False)
+            solo_rup = st.toggle("Solo items con ruptura", value=False)
 
-        sub = res[res["vendido"] > 0].copy()
+        sub = res.copy()
         if f_dest:
             sub = sub[sub["destino"].isin(f_dest)]
         if solo_rup:
             sub = sub[sub["ruptura"]]
-        sub = sub.sort_values(["ruptura", "unds_varadas"], ascending=[False, False])
 
-        cols = ["destino", "item", "referencia", "cant_ayer", "vendido", "cant_hoy",
-                "edad_pond_teorica", "edad_hoy", "delta_edad", "unds_varadas", "ruptura"]
-        t = sub[cols].copy()
-        t["item"] = pd.to_numeric(t["item"], errors="coerce").astype("Int64")
-        t["ruptura"] = t["ruptura"].map({True: "SÍ", False: "No"})
-        t = t.rename(columns={
-            "destino": "Destino", "item": "Item", "referencia": "Referencia",
-            "cant_ayer": "Inv. ayer", "vendido": "Vendido", "cant_hoy": "Inv. hoy",
-            "edad_pond_teorica": "Edad pond. teórica", "edad_hoy": "Edad pond. real",
-            "delta_edad": "Δ edad", "unds_varadas": "Unds varadas", "ruptura": "¿Ruptura?",
-        })
+        # Explota a nivel de lote: por cada (destino, item) recorre las edades de ayer y hoy.
+        # La venta se muestra una sola vez por item (en la edad más vieja del registro),
+        # para no inflar el total al sumar la columna.
+        registros = []
+        for r in sub.itertuples():
+            edades = sorted(set(r.vec_ayer) | set(r.vec_real))
+            if not edades:
+                continue
+            edad_marca_venta = max(edades)  # ancla para mostrar la venta una sola vez
+            for e in edades:
+                c_ayer = r.vec_ayer.get(e, 0)
+                c_hoy = r.vec_real.get(e, 0)
+                es_varado = (e > r.edad_max_teorica and c_hoy > 0
+                             and r.vendido < r.cant_ayer and r.ruptura)
+                registros.append({
+                    "Destino": r.destino,
+                    "Item": int(r.item) if str(r.item).isdigit() else r.item,
+                    "Referencia": r.referencia,
+                    "Edad (días)": e,
+                    "Cantidad ayer": c_ayer,
+                    "Cantidad hoy": c_hoy,
+                    "Vendido (item)": r.vendido if e == edad_marca_venta else 0,
+                    "_varado": es_varado,
+                })
 
-        def resalta_ruptura(row):
-            if row["¿Ruptura?"] == "SÍ":
-                return ["background-color:#FDEDEC;"] * len(row)
-            return [""] * len(row)
+        if not registros:
+            st.info("No hay registros para los filtros seleccionados.")
+        else:
+            tabla = pd.DataFrame(registros).sort_values(
+                ["Destino", "Item", "Edad (días)"], ascending=[True, True, False]
+            ).reset_index(drop=True)
 
-        styler = (
-            t.style.apply(resalta_ruptura, axis=1)
-            .format({"Inv. ayer": "{:,.0f}", "Vendido": "{:,.0f}", "Inv. hoy": "{:,.0f}",
-                     "Unds varadas": "{:,.0f}", "Edad pond. teórica": "{:.1f}",
-                     "Edad pond. real": "{:.1f}", "Δ edad": "{:.1f}", "Item": "{:.0f}"})
-        )
-        st.dataframe(styler, use_container_width=True, hide_index=True, height=520)
-        st.caption(f"{len(t):,} combinaciones mostradas.")
+            def color_edad(val):
+                try:
+                    v = float(val)
+                except (TypeError, ValueError):
+                    return ""
+                if v <= 0:
+                    return ""
+                if v <= 5:
+                    return "background-color:#C6EFCE; color:#006100; font-weight:700;"
+                elif v <= 6:
+                    return "background-color:#FFE08A; color:#7A5200; font-weight:700;"
+                elif v <= 9:
+                    return "background-color:#FFB84D; color:#7A3E00; font-weight:800;"
+                return "background-color:#FF8A80; color:#7A0006; font-weight:800;"
 
-    # ===== TAB 3: SEGUIMIENTO AYER VS HOY =====
-    with tab3:
-        st.subheader("Seguimiento: ayer vs hoy")
-        st.caption(
-            "Formato de seguimiento rápido por destino e item: cantidad y edad de ayer, "
-            "cantidad y edad de hoy, y lo vendido en el día."
-        )
+            def resalta_varado(row):
+                if row["_varado"]:
+                    return ["background-color:#FDEDEC;"] * len(row)
+                return [""] * len(row)
 
-        destinos = sorted(res["destino"].unique().tolist())
-        f_dest2 = st.multiselect("Destino (CEDI/Planta)", destinos, placeholder="Todos", key="seg_dest")
-
-        sub = res.copy()
-        if f_dest2:
-            sub = sub[sub["destino"].isin(f_dest2)]
-        sub = sub.sort_values(["destino", "edad_hoy"], ascending=[True, False])
-
-        cols = ["destino", "item", "referencia", "cant_ayer", "edad_ayer",
-                "cant_hoy", "edad_hoy", "vendido"]
-        t = sub[cols].copy()
-        t["item"] = pd.to_numeric(t["item"], errors="coerce").astype("Int64")
-        t = t.rename(columns={
-            "destino": "Destino", "item": "Item", "referencia": "Referencia",
-            "cant_ayer": "Cantidad ayer", "edad_ayer": "Edad ayer",
-            "cant_hoy": "Cantidad hoy", "edad_hoy": "Edad hoy", "vendido": "Vendido",
-        })
-
-        def color_edad_seg(val):
-            try:
-                v = float(val)
-            except (TypeError, ValueError):
-                return ""
-            if v <= 0:
-                return ""
-            if v <= 5:
-                return "background-color:#C6EFCE; color:#006100; font-weight:700;"
-            elif v <= 6:
-                return "background-color:#FFE08A; color:#7A5200; font-weight:700;"
-            elif v <= 9:
-                return "background-color:#FFB84D; color:#7A3E00; font-weight:800;"
-            return "background-color:#FF8A80; color:#7A0006; font-weight:800;"
-
-        styler = (
-            t.style
-            .map(color_edad_seg, subset=["Edad ayer", "Edad hoy"])
-            .format({"Cantidad ayer": "{:,.0f}", "Cantidad hoy": "{:,.0f}",
-                     "Vendido": "{:,.0f}", "Edad ayer": "{:.1f}", "Edad hoy": "{:.1f}",
-                     "Item": "{:.0f}"})
-        )
-        st.dataframe(styler, use_container_width=True, hide_index=True, height=560)
-        st.markdown(
-            "🟢 ≤5 días &nbsp;&nbsp; 🟡 6 días &nbsp;&nbsp; 🟠 7–9 días &nbsp;&nbsp; 🔴 10+ días "
-            "&nbsp;&nbsp;|&nbsp;&nbsp; *Edad* = edad promedio ponderada por cantidad."
-        )
-
-    # ----- Ventas no rastreables -----
-    with st.expander(f"⚠️ Ventas no rastreables ({no_map['cantidad'].sum():,.0f} unds sin destino)"):
-        st.caption(
-            "Ventas que no pudieron asignarse a un destino de inventario. Quedan fuera del análisis "
-            "PEPS hasta resolver el mapeo de estas bodegas."
-        )
-        nm = no_map.rename(columns={
-            "bodega_raw": "Bodega (descripción venta)", "motivo_map": "Motivo no-mapeo",
-            "cantidad": "Unds",
-        })
-        st.dataframe(
-            nm.style.format({"Unds": "{:,.0f}"}),
-            use_container_width=True, hide_index=True,
-        )
+            vista = tabla.drop(columns=["_varado"])
+            styler = (
+                vista.style
+                .apply(lambda row: resalta_varado(tabla.loc[row.name]), axis=1)
+                .map(color_edad, subset=["Edad (días)"])
+                .format({"Cantidad ayer": "{:,.0f}", "Cantidad hoy": "{:,.0f}",
+                         "Vendido (item)": lambda v: f"{v:,.0f}" if v else "—",
+                         "Item": "{:.0f}", "Edad (días)": "{:.0f}"})
+            )
+            st.dataframe(styler, use_container_width=True, hide_index=True, height=600)
+            st.markdown(
+                "🟢 ≤5 días &nbsp;&nbsp; 🟡 6 días &nbsp;&nbsp; 🟠 7–9 días &nbsp;&nbsp; 🔴 10+ días "
+                "&nbsp;&nbsp;|&nbsp;&nbsp; Filas con fondo rojo claro = lote viejo varado.  "
+                "*Vendido* se muestra una vez por item."
+            )
+            st.caption(f"{len(vista):,} lotes mostrados.")
 
     st.caption(
-        f"Fuentes: {ARCHIVO_AYER} (inicial ayer) · {ARCHIVO_VENTAS} (ventas del día) · "
+        f"Fuentes: {ARCHIVO_AYER} (inicial ayer) · {ARCHIVO_VENTAS} (ventas del período) · "
         f"{ARCHIVO_HOY} (inicial hoy) — hoja {HOJA_INV_ANALISIS}"
     )
 
