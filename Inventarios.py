@@ -1,37 +1,53 @@
 """
-Dashboard de Inventario de Edades - Huevos Kikes
-================================================
-Muestra el inventario actual de edades en plantas y centros de distribución.
+Dashboard de Inventarios - Huevos Kikes
+=======================================
+Aplicación de dos módulos:
 
-Fuente de datos: archivo 'Inventario Hoy.xlsx', hoja 'INV. EDADES'
-(debe estar en el mismo repositorio de GitHub que este archivo).
+  1) Inventario de Edades  -> vista actual de edades por planta/CEDI.
+                              Fuente: 'Inventario Hoy.xlsx', hoja 'INV. EDADES'.
 
-Columnas utilizadas:
-    CEDI, fecha, edad, item, cantidad, referencia, destino, tipo, tipo huevo, zona
+  2) Análisis de Rotación PEPS -> auditoría de rotación comparando el inventario
+                              inicial de ayer, las ventas del día y el inventario
+                              inicial de hoy. Detecta rupturas de rotación PEPS.
+                              Fuentes (raíz del repositorio de GitHub):
+                                - 'Inventario Hoy.xlsx'   (corte de anoche  = inicial de hoy)
+                                - 'Inventario Ayer.xlsx'  (corte de antenoche = inicial de ayer)
+                                - 'ventas.xlsx'           (ventas del día de ayer)
+
+Sube los tres archivos al repositorio y la app se actualizará al refrescar.
 """
+
+import re
+import unicodedata
+from collections import defaultdict
 
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-# ---------------------------------------------------------------------------
-# CONFIGURACIÓN GENERAL
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# CONFIGURACIÓN GENERAL Y MARCA
+# ===========================================================================
 st.set_page_config(
-    page_title="Dashboard Inventario de Edades | Huevos Kikes",
+    page_title="Inventarios | Huevos Kikes",
     page_icon="🥚",
     layout="wide",
 )
 
-# Paleta de marca Huevos Kikes
 COLOR_PRIMARIO = "#3DAE2B"   # verde Kikes
 COLOR_ACENTO = "#F7941D"     # naranja (yema del logo)
 COLOR_TEXTO = "#1A1A1A"
+COLOR_CRITICO = "#D0021B"
+COLOR_ADV = "#F5A623"
 
-ARCHIVO_DATOS = "Inventario Hoy.xlsx"
-HOJA_DATOS = "INV. EDADES"
+# Archivos esperados en la raíz del repositorio
+ARCHIVO_HOY = "Inventario Hoy.xlsx"
+ARCHIVO_AYER = "Inventario Ayer.xlsx"
+ARCHIVO_VENTAS = "ventas.xlsx"
+HOJA_EDADES_DASH = "INV. EDADES"   # hoja para el módulo 1 (dashboard de edades)
+HOJA_INV_ANALISIS = "INV. EDADES"  # hoja para el módulo 2 (análisis de rotación)
 
-# Estilos
+# Estilos compartidos
 st.markdown(
     f"""
     <style>
@@ -49,6 +65,18 @@ st.markdown(
             margin-bottom: 0.2rem;
             display: inline-block;
             border-bottom: 7px solid {COLOR_ACENTO};
+            padding-bottom: 0.15rem;
+        }}
+        .titulo-modulo {{
+            color: {COLOR_PRIMARIO};
+            font-family: 'Nunito', sans-serif;
+            font-size: 3.2rem;
+            font-weight: 900;
+            line-height: 1.05;
+            letter-spacing: -1.2px;
+            margin-bottom: 0.2rem;
+            display: inline-block;
+            border-bottom: 6px solid {COLOR_ACENTO};
             padding-bottom: 0.15rem;
         }}
 
@@ -76,11 +104,9 @@ st.markdown(
             margin: 0;
             line-height: 1.1;
         }}
-        /* Acentos por estado */
         .kpi-neutral {{ border-left-color: {COLOR_PRIMARIO}; }}
-        .kpi-warning {{ border-left-color: #F5A623; }}
-        .kpi-critical {{ border-left-color: #D0021B; }}
-        /* Tarjeta reina: edad promedio ponderada */
+        .kpi-warning {{ border-left-color: {COLOR_ADV}; }}
+        .kpi-critical {{ border-left-color: {COLOR_CRITICO}; }}
         .kpi-reina {{
             background: linear-gradient(135deg, #F2FAF0 0%, #FFFFFF 100%);
             border-left: 9px solid {COLOR_PRIMARIO};
@@ -118,261 +144,690 @@ def tarjeta_kpi(label, value, estado="neutral", reina=False):
     )
 
 
-# ---------------------------------------------------------------------------
-# CARGA DE DATOS
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# UTILIDADES COMPARTIDAS
+# ===========================================================================
+def norm(s):
+    """Normaliza texto: mayúsculas, sin acentos, sin espacios dobles."""
+    if s is None:
+        return ""
+    s = str(s).strip().upper()
+    s = "".join(c for c in unicodedata.normalize("NFKD", s) if not unicodedata.combining(c))
+    return re.sub(r"\s+", " ", s)
+
+
+def norm_item(serie: pd.Series) -> pd.Series:
+    """Normaliza códigos de item a string entero limpio.
+
+    El inventario trae el item como float (p.ej. 112357.0) y ventas como
+    string (p.ej. '2110302'). Unificamos ambos a '112357' / '2110302' para que
+    el cruce por código funcione correctamente.
+    """
+    num = pd.to_numeric(serie, errors="coerce")
+    out = num.astype("Int64").astype("string")            # 112357.0 -> '112357'
+    no_num = num.isna() & serie.notna()                   # valores no numéricos (raros)
+    out[no_num] = serie[no_num].astype("string").str.strip()
+    return out
+
+
+# ===========================================================================
+# MÓDULO 1 — DASHBOARD DE INVENTARIO DE EDADES  (sin cambios funcionales)
+# ===========================================================================
 @st.cache_data(ttl=3600)
-def cargar_datos(ruta: str, hoja: str) -> pd.DataFrame:
+def cargar_datos_edades(ruta: str, hoja: str) -> pd.DataFrame:
     df = pd.read_excel(ruta, sheet_name=hoja)
-
-    # Normaliza los nombres de columnas: minúsculas y sin espacios extra
     df.columns = [str(c).strip().lower() for c in df.columns]
-
-    # Renombra "tipo huevo" si viniera con variaciones
     renombres = {}
     for col in df.columns:
         if col in ("tipo huevo", "tipo_huevo", "tipohuevo"):
             renombres[col] = "tipo huevo"
     df = df.rename(columns=renombres)
-
-    # Tipos numéricos seguros
     if "edad" in df.columns:
         df["edad"] = pd.to_numeric(df["edad"], errors="coerce").astype("Int64")
     if "cantidad" in df.columns:
         df["cantidad"] = pd.to_numeric(df["cantidad"], errors="coerce").fillna(0)
-
     return df
 
 
-try:
-    df = cargar_datos(ARCHIVO_DATOS, HOJA_DATOS)
-except FileNotFoundError:
-    st.error(
-        f"No se encontró el archivo **{ARCHIVO_DATOS}**. "
-        "Asegúrate de que esté en la raíz del repositorio de GitHub."
-    )
-    st.stop()
-except ValueError:
-    st.error(
-        f"No se encontró la hoja **{HOJA_DATOS}** dentro de {ARCHIVO_DATOS}. "
-        "Verifica el nombre exacto de la hoja."
-    )
-    st.stop()
-
-
-# ---------------------------------------------------------------------------
-# ENCABEZADO
-# ---------------------------------------------------------------------------
-st.markdown('<p class="titulo-principal">🥚 Inventario de Edades</p>', unsafe_allow_html=True)
-st.divider()
-
-
-# ---------------------------------------------------------------------------
-# FILTROS (multiselección en el encabezado)
-# ---------------------------------------------------------------------------
-def opciones(col: str):
-    if col in df.columns:
-        return sorted(df[col].dropna().unique().tolist())
-    return []
-
-
-c1, c2, c3, c4 = st.columns(4)
-
-with c1:
-    f_zona = st.multiselect("Zona", opciones("zona"), placeholder="Todas")
-with c2:
-    f_edad = st.multiselect("Edad", opciones("edad"), placeholder="Todas")
-with c3:
-    f_tipo = st.multiselect("Tipo", opciones("tipo"), placeholder="Todos")
-with c4:
-    f_destino = st.multiselect("Destino", opciones("destino"), placeholder="Todos")
-
-# Aplica filtros
-dff = df.copy()
-if f_zona:
-    dff = dff[dff["zona"].isin(f_zona)]
-if f_edad:
-    dff = dff[dff["edad"].isin(f_edad)]
-if f_tipo:
-    dff = dff[dff["tipo"].isin(f_tipo)]
-if f_destino:
-    dff = dff[dff["destino"].isin(f_destino)]
-
-st.divider()
-
-
-# ---------------------------------------------------------------------------
-# KPIs
-# ---------------------------------------------------------------------------
-inv_total = dff["cantidad"].sum()
-und_mas_6 = dff.loc[dff["edad"] > 6, "cantidad"].sum()
-und_mas_10 = dff.loc[dff["edad"] >= 10, "cantidad"].sum()
-# Edad ponderada: ignora filas sin edad para no romper el cálculo
-_val = dff.dropna(subset=["edad"])
-_peso = _val["cantidad"].sum()
-edad_prom = (
-    (_val["edad"].astype(float) * _val["cantidad"]).sum() / _peso if _peso > 0 else 0
-)
-pct_mas_6 = (und_mas_6 / inv_total * 100) if inv_total > 0 else 0
-
-k1, k2, k3, k4, k5 = st.columns(5)
-
-# Métrica reina al extremo izquierdo (lo primero que se lee)
-with k1:
-    st.markdown(
-        tarjeta_kpi("Edad promedio ponderada", f"{edad_prom:,.1f} días", reina=True),
-        unsafe_allow_html=True,
-    )
-with k2:
-    st.markdown(
-        tarjeta_kpi("Inventario total (und)", f"{inv_total:,.0f}", estado="neutral"),
-        unsafe_allow_html=True,
-    )
-with k3:
-    st.markdown(
-        tarjeta_kpi("Unidades con más de 6 días", f"{und_mas_6:,.0f}", estado="warning"),
-        unsafe_allow_html=True,
-    )
-with k4:
-    st.markdown(
-        tarjeta_kpi("% con más de 6 días", f"{pct_mas_6:,.1f}%", estado="warning"),
-        unsafe_allow_html=True,
-    )
-with k5:
-    st.markdown(
-        tarjeta_kpi("Unidades con 10+ días", f"{und_mas_10:,.0f}", estado="critical"),
-        unsafe_allow_html=True,
-    )
-
-st.divider()
-
-
-# ---------------------------------------------------------------------------
-# HISTOGRAMA DE DISTRIBUCIÓN DE INVENTARIO POR EDAD
-# ---------------------------------------------------------------------------
-st.subheader("Distribución del inventario por edad")
-
-# Agrupa cantidad por edad; agrupa 10+ en una sola barra
-dist = dff.dropna(subset=["edad"]).copy()
-dist["edad_int"] = dist["edad"].astype(int)
-dist["bucket"] = dist["edad_int"].apply(lambda x: "10+" if x >= 10 else str(x))
-
-# Orden correcto del eje X
-orden_buckets = [str(i) for i in range(0, 10)] + ["10+"]
-serie = (
-    dist.groupby("bucket")["cantidad"].sum()
-    .reindex(orden_buckets, fill_value=0)
-)
-
-
-def color_barra(bucket):
-    if bucket == "10+":
-        return "#D0021B"          # rojo crítico
-    val = int(bucket)
-    if val <= 5:
-        return COLOR_PRIMARIO     # verde óptimo
-    elif val <= 9:
-        return "#F5A623"          # amarillo/naranja advertencia
-    return "#D0021B"
-
-
-colores = [color_barra(b) for b in serie.index]
-
-fig = go.Figure(
-    go.Bar(
-        x=list(serie.index),
-        y=serie.values,
-        marker_color=colores,
-        text=[f"{v:,.0f}" if v > 0 else "" for v in serie.values],
-        textposition="outside",
-        hovertemplate="Edad: %{x} días<br>Cantidad: %{y:,.0f} und<extra></extra>",
-    )
-)
-fig.update_layout(
-    height=360,
-    margin=dict(l=10, r=10, t=10, b=10),
-    plot_bgcolor="rgba(0,0,0,0)",
-    paper_bgcolor="rgba(0,0,0,0)",
-    font=dict(family="Nunito, sans-serif", size=13),
-    xaxis=dict(title="Días de edad del producto", tickmode="linear"),
-    yaxis=dict(title="Unidades", showgrid=True, gridcolor="#EEEEEE"),
-    bargap=0.25,
-)
-st.plotly_chart(fig, use_container_width=True)
-
-st.divider()
-
-
-# ---------------------------------------------------------------------------
-# TABLA DETALLADA CON SEMÁFORO POR EDAD
-# ---------------------------------------------------------------------------
-st.subheader("Detalle de inventario")
-
-# Columnas a mostrar (en el orden de la imagen de referencia)
-cols_tabla = [c for c in ["destino", "edad", "item", "referencia", "cantidad"] if c in dff.columns]
-
-tabla = (
-    dff[cols_tabla]
-    .groupby([c for c in cols_tabla if c != "cantidad"], as_index=False)["cantidad"]
-    .sum()
-    .sort_values(["destino", "edad"], ascending=[True, False])
-    .reset_index(drop=True)
-)
-
-tabla = tabla.rename(
-    columns={
-        "destino": "Destino",
-        "edad": "Edad",
-        "item": "Item",
-        "referencia": "Referencia",
-        "cantidad": "Suma de Cantidad",
-    }
-)
-
-
-def color_edad(val):
-    """Semáforo por rango de edad, con intensidad creciente."""
+def render_modulo_edades():
     try:
-        v = float(val)
-    except (TypeError, ValueError):
-        return ""
-    if 1 <= v <= 5:
-        return "background-color: #C6EFCE; color: #006100; font-weight: 700;"   # verde - óptimo
-    elif v == 6:
-        return "background-color: #FFE08A; color: #7A5200; font-weight: 700;"    # amarillo
-    elif 7 <= v <= 9:
-        return "background-color: #FFB84D; color: #7A3E00; font-weight: 800;"    # naranja vivo (día 7+)
-    elif v >= 10:
-        return "background-color: #FF8A80; color: #7A0006; font-weight: 800;"    # rojo claro - crítico
-    return ""
+        df = cargar_datos_edades(ARCHIVO_HOY, HOJA_EDADES_DASH)
+    except FileNotFoundError:
+        st.error(
+            f"No se encontró el archivo **{ARCHIVO_HOY}**. "
+            "Asegúrate de que esté en la raíz del repositorio de GitHub."
+        )
+        st.stop()
+    except ValueError:
+        st.error(
+            f"No se encontró la hoja **{HOJA_EDADES_DASH}** dentro de {ARCHIVO_HOY}. "
+            "Verifica el nombre exacto de la hoja."
+        )
+        st.stop()
 
+    st.markdown('<p class="titulo-principal">🥚 Inventario de Edades</p>', unsafe_allow_html=True)
+    st.divider()
 
-# Asegura que Item se muestre como entero (es un código, sin decimales)
-if "Item" in tabla.columns:
-    tabla["Item"] = pd.to_numeric(tabla["Item"], errors="coerce").astype("Int64")
+    def opciones(col: str):
+        if col in df.columns:
+            return sorted(df[col].dropna().unique().tolist())
+        return []
 
-styler = (
-    tabla.style
-    .map(color_edad, subset=["Edad"])
-    .bar(
-        subset=["Suma de Cantidad"],
-        color="#BFE3B5",          # verde Kikes suave para las barras de datos
-        align="left",
-        height=70,
-        vmin=0,
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        f_zona = st.multiselect("Zona", opciones("zona"), placeholder="Todas")
+    with c2:
+        f_edad = st.multiselect("Edad", opciones("edad"), placeholder="Todas")
+    with c3:
+        f_tipo = st.multiselect("Tipo", opciones("tipo"), placeholder="Todos")
+    with c4:
+        f_destino = st.multiselect("Destino", opciones("destino"), placeholder="Todos")
+
+    dff = df.copy()
+    if f_zona:
+        dff = dff[dff["zona"].isin(f_zona)]
+    if f_edad:
+        dff = dff[dff["edad"].isin(f_edad)]
+    if f_tipo:
+        dff = dff[dff["tipo"].isin(f_tipo)]
+    if f_destino:
+        dff = dff[dff["destino"].isin(f_destino)]
+
+    st.divider()
+
+    inv_total = dff["cantidad"].sum()
+    und_mas_6 = dff.loc[dff["edad"] > 6, "cantidad"].sum()
+    und_mas_10 = dff.loc[dff["edad"] >= 10, "cantidad"].sum()
+    _val = dff.dropna(subset=["edad"])
+    _peso = _val["cantidad"].sum()
+    edad_prom = (
+        (_val["edad"].astype(float) * _val["cantidad"]).sum() / _peso if _peso > 0 else 0
     )
-    .format({"Suma de Cantidad": "{:,.0f}", "Edad": "{:.0f}", "Item": "{:.0f}"})
-)
+    pct_mas_6 = (und_mas_6 / inv_total * 100) if inv_total > 0 else 0
 
-st.dataframe(styler, use_container_width=True, hide_index=True, height=600)
+    k1, k2, k3, k4, k5 = st.columns(5)
+    with k1:
+        st.markdown(
+            tarjeta_kpi("Edad promedio ponderada", f"{edad_prom:,.1f} días", reina=True),
+            unsafe_allow_html=True,
+        )
+    with k2:
+        st.markdown(
+            tarjeta_kpi("Inventario total (und)", f"{inv_total:,.0f}", estado="neutral"),
+            unsafe_allow_html=True,
+        )
+    with k3:
+        st.markdown(
+            tarjeta_kpi("Unidades con más de 6 días", f"{und_mas_6:,.0f}", estado="warning"),
+            unsafe_allow_html=True,
+        )
+    with k4:
+        st.markdown(
+            tarjeta_kpi("% con más de 6 días", f"{pct_mas_6:,.1f}%", estado="warning"),
+            unsafe_allow_html=True,
+        )
+    with k5:
+        st.markdown(
+            tarjeta_kpi("Unidades con 10+ días", f"{und_mas_10:,.0f}", estado="critical"),
+            unsafe_allow_html=True,
+        )
 
-# Leyenda del semáforo
-st.markdown(
-    """
-    **Convención de edades:**
-    🟢 1–5 días: óptimo &nbsp;&nbsp; 🟡 6 días: alerta &nbsp;&nbsp; 🟠 7–9 días: preocupante &nbsp;&nbsp; 🔴 10+ días: crítico
-    &nbsp;&nbsp;|&nbsp;&nbsp; Las barras en *Suma de Cantidad* son proporcionales al volumen de cada fila.
-    """
-)
+    st.divider()
+    st.subheader("Distribución del inventario por edad")
 
-st.caption(f"Fuente: {ARCHIVO_DATOS} — hoja {HOJA_DATOS}")
+    dist = dff.dropna(subset=["edad"]).copy()
+    dist["edad_int"] = dist["edad"].astype(int)
+    dist["bucket"] = dist["edad_int"].apply(lambda x: "10+" if x >= 10 else str(x))
+    orden_buckets = [str(i) for i in range(0, 10)] + ["10+"]
+    serie = dist.groupby("bucket")["cantidad"].sum().reindex(orden_buckets, fill_value=0)
+
+    def color_barra(bucket):
+        if bucket == "10+":
+            return COLOR_CRITICO
+        val = int(bucket)
+        if val <= 5:
+            return COLOR_PRIMARIO
+        elif val <= 9:
+            return COLOR_ADV
+        return COLOR_CRITICO
+
+    colores = [color_barra(b) for b in serie.index]
+    fig = go.Figure(
+        go.Bar(
+            x=list(serie.index),
+            y=serie.values,
+            marker_color=colores,
+            text=[f"{v:,.0f}" if v > 0 else "" for v in serie.values],
+            textposition="outside",
+            hovertemplate="Edad: %{x} días<br>Cantidad: %{y:,.0f} und<extra></extra>",
+        )
+    )
+    fig.update_layout(
+        height=360,
+        margin=dict(l=10, r=10, t=10, b=10),
+        plot_bgcolor="rgba(0,0,0,0)",
+        paper_bgcolor="rgba(0,0,0,0)",
+        font=dict(family="Nunito, sans-serif", size=13),
+        xaxis=dict(title="Días de edad del producto", tickmode="linear"),
+        yaxis=dict(title="Unidades", showgrid=True, gridcolor="#EEEEEE"),
+        bargap=0.25,
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+    st.divider()
+    st.subheader("Detalle de inventario")
+
+    cols_tabla = [c for c in ["destino", "edad", "item", "referencia", "cantidad"] if c in dff.columns]
+    tabla = (
+        dff[cols_tabla]
+        .groupby([c for c in cols_tabla if c != "cantidad"], as_index=False)["cantidad"]
+        .sum()
+        .sort_values(["destino", "edad"], ascending=[True, False])
+        .reset_index(drop=True)
+    )
+    tabla = tabla.rename(
+        columns={
+            "destino": "Destino",
+            "edad": "Edad",
+            "item": "Item",
+            "referencia": "Referencia",
+            "cantidad": "Suma de Cantidad",
+        }
+    )
+
+    def color_edad(val):
+        try:
+            v = float(val)
+        except (TypeError, ValueError):
+            return ""
+        if 1 <= v <= 5:
+            return "background-color: #C6EFCE; color: #006100; font-weight: 700;"
+        elif v == 6:
+            return "background-color: #FFE08A; color: #7A5200; font-weight: 700;"
+        elif 7 <= v <= 9:
+            return "background-color: #FFB84D; color: #7A3E00; font-weight: 800;"
+        elif v >= 10:
+            return "background-color: #FF8A80; color: #7A0006; font-weight: 800;"
+        return ""
+
+    if "Item" in tabla.columns:
+        tabla["Item"] = pd.to_numeric(tabla["Item"], errors="coerce").astype("Int64")
+
+    styler = (
+        tabla.style
+        .map(color_edad, subset=["Edad"])
+        .bar(subset=["Suma de Cantidad"], color="#BFE3B5", align="left", height=70, vmin=0)
+        .format({"Suma de Cantidad": "{:,.0f}", "Edad": "{:.0f}", "Item": "{:.0f}"})
+    )
+    st.dataframe(styler, use_container_width=True, hide_index=True, height=600)
+
+    st.markdown(
+        """
+        **Convención de edades:**
+        🟢 1–5 días: óptimo &nbsp;&nbsp; 🟡 6 días: alerta &nbsp;&nbsp; 🟠 7–9 días: preocupante &nbsp;&nbsp; 🔴 10+ días: crítico
+        &nbsp;&nbsp;|&nbsp;&nbsp; Las barras en *Suma de Cantidad* son proporcionales al volumen de cada fila.
+        """
+    )
+    st.caption(f"Fuente: {ARCHIVO_HOY} — hoja {HOJA_EDADES_DASH}")
+
+
+# ===========================================================================
+# MÓDULO 2 — ANÁLISIS DE ROTACIÓN PEPS
+# ===========================================================================
+
+# --- Mapeo bodega de venta -> destino de inventario --------------------------
+def map_bodega(desc):
+    """Devuelve (destino_inv, motivo). destino=None si no mapea."""
+    b = norm(desc)
+    if b == "BODEGA KIKES":
+        return "LANZA", "regla BODEGA KIKES=LANZA"
+    if "MONTEVIDEO" in b:
+        return "TAT BOGOTA MONTEVIDEO", "bogota montevideo"
+    if "SIBERIA" in b:
+        return "TAT BOGOTA SIBERIA", "bogota siberia"
+    ciudades = {
+        "BARRANQUILLA": "TAT BARRANQUILLA", "BUCARAMANGA": "TAT BUCARAMANGA",
+        "CARTAGENA": "TAT CARTAGENA", "CUCUTA": "TAT CUCUTA",
+        "MEDELLIN": "TAT MEDELLIN", "MONTERIA": "TAT MONTERIA",
+        "PASTO": "TAT PASTO", "POPAYAN": "TAT POPAYAN",
+        "SANTAMARTA": "TAT SANTA MARTA", "SANTA MARTA": "TAT SANTA MARTA",
+        "SINCELEJO": "TAT SINCELEJO", "VALLEDUPAR": "TAT VALLEDUPAR",
+        "VILLAVICENCIO": "TAT VILLAVICENCIO", "CALI": "TAT CALI",
+    }
+    for k, v in ciudades.items():
+        if k in b:
+            return v, f"ciudad={k}"
+    if "BELLAVISTA" in b:
+        return "BELLAVISTA", "planta"
+    if "PALMAS" in b:
+        return "PALMAS", "planta"
+    if "EGIPTO" in b:
+        return None, "EGIPTO (no en EDADES)"
+    if b.startswith("BODEGA BOGOTA") or "BEES BOGOTA" in b:
+        return None, "bodega bogota genérica (ambiguo Montevideo/Siberia)"
+    if "PEREIRA" in b:
+        return "OL. PEREIRA", "pereira"
+    return None, "sin mapeo"
+
+
+@st.cache_data(ttl=3600)
+def leer_inventario(ruta: str, hoja: str) -> pd.DataFrame:
+    """Lee la hoja INV. EDADES y devuelve columnas estandarizadas."""
+    df = pd.read_excel(ruta, sheet_name=hoja)
+    df.columns = [str(c).strip().lower() for c in df.columns]
+    col = {c: c for c in df.columns}
+    # columnas esperadas: destino, edad, item, cantidad, referencia
+    out = pd.DataFrame({
+        "destino": df.get("destino").map(norm) if "destino" in df else "",
+        "edad": pd.to_numeric(df.get("edad"), errors="coerce"),
+        "item": norm_item(df.get("item")),
+        "referencia": df.get("referencia"),
+        "cantidad": pd.to_numeric(df.get("cantidad"), errors="coerce").fillna(0.0),
+    })
+    out = out.dropna(subset=["edad", "item"])
+    out = out[out["destino"] != ""]
+    out["edad"] = out["edad"].astype(int)
+    return out
+
+
+@st.cache_data(ttl=3600)
+def leer_ventas(ruta: str) -> pd.DataFrame:
+    """Lee ventas, filtra línea HU y mapea bodega->destino."""
+    raw = pd.read_excel(ruta, sheet_name=0)
+    raw.columns = [str(c).strip().lower() for c in raw.columns]
+    df = raw[raw["codigo_linea"] == "HU"].copy()
+    df["item"] = norm_item(df["id_item"])
+    df["cantidad"] = pd.to_numeric(df["cantidad"], errors="coerce").fillna(0.0)
+    mapeo = df["descripcion"].apply(map_bodega)
+    df["destino"] = mapeo.apply(lambda t: t[0])
+    df["motivo_map"] = mapeo.apply(lambda t: t[1])
+    df["bodega_raw"] = df["descripcion"]
+    return df[["item", "cantidad", "destino", "motivo_map", "bodega_raw"]]
+
+
+def vec_por_edad(df, dest, item):
+    """dict edad->cantidad para un destino/item."""
+    sub = df[(df["destino"] == dest) & (df["item"] == item)]
+    d = defaultdict(float)
+    for r in sub.itertuples():
+        d[int(r.edad)] += float(r.cantidad)
+    return d
+
+
+def edad_ponderada(d):
+    t = sum(d.values())
+    return sum(e * c for e, c in d.items()) / t if t > 0 else 0.0
+
+
+def peps_consumir(inv_envejecido, vendido):
+    """Consume 'vendido' por PEPS (edad mayor primero). Devuelve (remanente, faltante)."""
+    rem = dict(inv_envejecido)
+    restante = vendido
+    for edad in sorted(rem.keys(), reverse=True):
+        if restante <= 0:
+            break
+        toma = min(rem[edad], restante)
+        rem[edad] -= toma
+        restante -= toma
+    rem = {e: c for e, c in rem.items() if c > 0.5}
+    return rem, restante
+
+
+@st.cache_data(ttl=3600)
+def construir_analisis(inv_ayer, inv_hoy, ventas):
+    """Motor PEPS. Devuelve (resultados_df, ventas_no_mapeadas_df)."""
+    ven_ok = ventas.dropna(subset=["destino"])
+    ven_map = ven_ok.groupby(["destino", "item"])["cantidad"].sum().to_dict()
+
+    ref_map = {}
+    for df in (inv_ayer, inv_hoy):
+        for r in df.itertuples():
+            if r.item not in ref_map and pd.notna(r.referencia) and str(r.referencia) != "#N/D":
+                ref_map[r.item] = r.referencia
+
+    claves = inv_ayer.groupby(["destino", "item"]).size().index.tolist()
+    filas = []
+    for dest, item in claves:
+        va = vec_por_edad(inv_ayer, dest, item)
+        vh = vec_por_edad(inv_hoy, dest, item)
+        vendido = float(ven_map.get((dest, item), 0.0))
+        tot_ayer = sum(va.values())
+        tot_hoy = sum(vh.values())
+
+        va_env = defaultdict(float)
+        for e, c in va.items():
+            va_env[e + 1] += c
+        teorico, faltante = peps_consumir(va_env, vendido)
+
+        edad_max_teorica = max(teorico.keys()) if teorico else (max(va_env.keys()) if va_env else 0)
+        edad_mas_vieja_ayer = max(va_env.keys()) if va_env else 0
+
+        # --- Detección de producto viejo varado ---
+        varado = 0.0
+        detalle_varado = []
+        if vendido >= tot_ayer - 0.5:
+            # Se vendió todo lo de ayer: lo de hoy es entrada nueva -> sin varado.
+            varado = 0.0
+        elif teorico:
+            for e, c in sorted(vh.items()):
+                if e > edad_max_teorica:
+                    varado += c
+                    detalle_varado.append((e, c))
+        else:
+            for e, c in sorted(vh.items()):
+                if e >= edad_mas_vieja_ayer and edad_mas_vieja_ayer > 0:
+                    varado += c
+                    detalle_varado.append((e, c))
+
+        ep_teo = edad_ponderada(teorico)
+        ep_real = edad_ponderada(vh)
+        ep_ayer = edad_ponderada(va)
+        ruptura = (varado > 0.5) and (vendido > 0)
+
+        # Diagnóstico textual
+        edades_real = list(vh.keys())
+        edad_max_real = max(edades_real) if edades_real else 0
+        salto = edad_max_real - edad_mas_vieja_ayer
+        if not ruptura:
+            diag = ""
+        elif salto >= 2:
+            diag = (f"Apareció lote de {edad_max_real}d (imposible por envejecimiento normal): "
+                    "posible reingreso/devolución o conteo inconsistente")
+        elif teorico and edad_max_real > max(teorico.keys()):
+            diag = "Lote viejo no rotó: salió producto más nuevo dejando varado el antiguo"
+        else:
+            diag = "Producto antiguo permanece pese a haber ventas del día"
+
+        filas.append({
+            "destino": dest, "item": item, "referencia": ref_map.get(item, ""),
+            "cant_ayer": tot_ayer, "edad_ayer": round(ep_ayer, 1),
+            "vendido": vendido,
+            "cant_hoy": tot_hoy, "edad_hoy": round(ep_real, 1),
+            "edad_pond_teorica": round(ep_teo, 1),
+            "delta_edad": round(ep_real - ep_teo, 1),
+            "edad_max_teorica": edad_max_teorica,
+            "unds_varadas": round(varado, 0),
+            "faltante_peps": round(faltante, 0),
+            "ruptura": ruptura, "diagnostico": diag,
+            "vec_teorico": dict(teorico), "vec_real": dict(vh),
+            "edad_mas_vieja_ayer": edad_mas_vieja_ayer,
+        })
+
+    res = pd.DataFrame(filas)
+    no_map = ventas[ventas["destino"].isna()].groupby(
+        ["bodega_raw", "motivo_map"])["cantidad"].sum().reset_index()
+    no_map = no_map.sort_values("cantidad", ascending=False)
+    return res, no_map
+
+
+def render_modulo_rotacion():
+    st.markdown('<p class="titulo-modulo">🔄 Análisis de Rotación PEPS</p>', unsafe_allow_html=True)
+    st.caption(
+        "Compara el inventario inicial de ayer + ventas del día contra el inventario inicial de hoy. "
+        "Lógica: se envejece +1 día cada lote de ayer, se consume la venta por PEPS (más viejo primero) "
+        "y se contrasta contra el inventario real de hoy."
+    )
+    st.divider()
+
+    # Carga
+    faltantes = []
+    try:
+        inv_ayer = leer_inventario(ARCHIVO_AYER, HOJA_INV_ANALISIS)
+    except FileNotFoundError:
+        faltantes.append(ARCHIVO_AYER)
+    try:
+        inv_hoy = leer_inventario(ARCHIVO_HOY, HOJA_INV_ANALISIS)
+    except FileNotFoundError:
+        faltantes.append(ARCHIVO_HOY)
+    try:
+        ventas = leer_ventas(ARCHIVO_VENTAS)
+    except FileNotFoundError:
+        faltantes.append(ARCHIVO_VENTAS)
+
+    if faltantes:
+        st.error(
+            "No se encontraron estos archivos en la raíz del repositorio: "
+            + ", ".join(f"**{f}**" for f in faltantes)
+            + ". Súbelos para activar el análisis."
+        )
+        st.stop()
+
+    res, no_map = construir_analisis(inv_ayer, inv_hoy, ventas)
+    rupturas = res[res["ruptura"]]
+
+    # --- KPIs ---
+    cob = ventas.dropna(subset=["destino"])["cantidad"].sum() / ventas["cantidad"].sum() * 100 \
+        if ventas["cantidad"].sum() > 0 else 0
+    k1, k2, k3, k4, k5 = st.columns(5)
+    with k1:
+        st.markdown(tarjeta_kpi("Rupturas de rotación", f"{len(rupturas):,}",
+                                estado="critical" if len(rupturas) else "neutral", reina=True),
+                    unsafe_allow_html=True)
+    with k2:
+        st.markdown(tarjeta_kpi("Unidades viejas varadas", f"{rupturas['unds_varadas'].sum():,.0f}",
+                                estado="critical"), unsafe_allow_html=True)
+    with k3:
+        st.markdown(tarjeta_kpi("Combinaciones evaluadas", f"{len(res):,}", estado="neutral"),
+                    unsafe_allow_html=True)
+    with k4:
+        st.markdown(tarjeta_kpi("Con venta registrada", f"{(res['vendido'] > 0).sum():,}",
+                                estado="neutral"), unsafe_allow_html=True)
+    with k5:
+        st.markdown(tarjeta_kpi("Cobertura de ventas", f"{cob:,.0f}%",
+                                estado="warning" if cob < 90 else "neutral"), unsafe_allow_html=True)
+
+    st.divider()
+
+    # ----- Sub-secciones por pestañas -----
+    tab1, tab2, tab3 = st.tabs(
+        ["🚨 Rupturas PEPS", "📋 Balance por destino", "🔎 Seguimiento ayer vs hoy"]
+    )
+
+    # ===== TAB 1: RUPTURAS PEPS =====
+    with tab1:
+        st.subheader("Rupturas de rotación detectadas")
+        st.caption(
+            "Producto viejo que, según PEPS, debió salir y permanece en inventario "
+            "(o reapareció más viejo de lo posible)."
+        )
+        if rupturas.empty:
+            st.success("✅ No se detectaron rupturas de rotación con los datos cargados.")
+        else:
+            cols = ["destino", "item", "referencia", "cant_ayer", "vendido", "cant_hoy",
+                    "edad_max_teorica", "edad_pond_teorica", "edad_hoy", "unds_varadas",
+                    "diagnostico"]
+            t = rupturas.sort_values("unds_varadas", ascending=False)[cols].copy()
+            t["item"] = pd.to_numeric(t["item"], errors="coerce").astype("Int64")
+            t = t.rename(columns={
+                "destino": "Destino", "item": "Item", "referencia": "Referencia",
+                "cant_ayer": "Inv. ayer", "vendido": "Vendido", "cant_hoy": "Inv. hoy",
+                "edad_max_teorica": "Edad máx. teórica", "edad_pond_teorica": "Edad pond. teórica",
+                "edad_hoy": "Edad pond. real", "unds_varadas": "Unds varadas",
+                "diagnostico": "Diagnóstico",
+            })
+            styler = (
+                t.style
+                .format({"Inv. ayer": "{:,.0f}", "Vendido": "{:,.0f}", "Inv. hoy": "{:,.0f}",
+                         "Unds varadas": "{:,.0f}", "Edad pond. teórica": "{:.1f}",
+                         "Edad pond. real": "{:.1f}", "Item": "{:.0f}"})
+                .map(lambda _: f"color:{COLOR_CRITICO}; font-weight:800;", subset=["Unds varadas"])
+            )
+            st.dataframe(styler, use_container_width=True, hide_index=True)
+
+            st.markdown("##### Detalle por edad de la ruptura seleccionada")
+            opciones_rup = [
+                f"{r.destino} — {int(r.item) if str(r.item).isdigit() else r.item} — {r.referencia}"
+                for r in rupturas.sort_values("unds_varadas", ascending=False).itertuples()
+            ]
+            sel = st.selectbox("Selecciona una ruptura para ver el detalle lote a lote", opciones_rup)
+            if sel:
+                idx = opciones_rup.index(sel)
+                r = rupturas.sort_values("unds_varadas", ascending=False).iloc[idx]
+                edades = sorted(set(r["vec_teorico"]) | set(r["vec_real"]))
+                det = pd.DataFrame({
+                    "Edad (días)": edades,
+                    "Teórico PEPS": [r["vec_teorico"].get(e, 0) for e in edades],
+                    "Real hoy": [r["vec_real"].get(e, 0) for e in edades],
+                })
+                det["Diferencia"] = det["Real hoy"] - det["Teórico PEPS"]
+                det["Marca"] = [
+                    "VARADO" if (e > r["edad_max_teorica"] and r["vec_real"].get(e, 0) > 0
+                                 and r["vendido"] < r["cant_ayer"]) else ""
+                    for e in edades
+                ]
+
+                def marca_fila(row):
+                    if row["Marca"] == "VARADO":
+                        return ["background-color:#FFE08A; font-weight:700;"] * len(row)
+                    return [""] * len(row)
+
+                det_styler = (
+                    det.style.apply(marca_fila, axis=1)
+                    .format({"Teórico PEPS": "{:,.0f}", "Real hoy": "{:,.0f}", "Diferencia": "{:,.0f}"})
+                )
+                st.dataframe(det_styler, use_container_width=True, hide_index=True)
+
+    # ===== TAB 2: BALANCE POR DESTINO (filtrable) =====
+    with tab2:
+        st.subheader("Balance completo por destino")
+        st.caption("Todas las combinaciones con venta registrada. Filtra por destino para revisar uno a la vez.")
+
+        destinos = sorted(res["destino"].unique().tolist())
+        cfilt1, cfilt2 = st.columns([2, 1])
+        with cfilt1:
+            f_dest = st.multiselect("Destino (CEDI/Planta)", destinos, placeholder="Todos")
+        with cfilt2:
+            solo_rup = st.toggle("Solo rupturas", value=False)
+
+        sub = res[res["vendido"] > 0].copy()
+        if f_dest:
+            sub = sub[sub["destino"].isin(f_dest)]
+        if solo_rup:
+            sub = sub[sub["ruptura"]]
+        sub = sub.sort_values(["ruptura", "unds_varadas"], ascending=[False, False])
+
+        cols = ["destino", "item", "referencia", "cant_ayer", "vendido", "cant_hoy",
+                "edad_pond_teorica", "edad_hoy", "delta_edad", "unds_varadas", "ruptura"]
+        t = sub[cols].copy()
+        t["item"] = pd.to_numeric(t["item"], errors="coerce").astype("Int64")
+        t["ruptura"] = t["ruptura"].map({True: "SÍ", False: "No"})
+        t = t.rename(columns={
+            "destino": "Destino", "item": "Item", "referencia": "Referencia",
+            "cant_ayer": "Inv. ayer", "vendido": "Vendido", "cant_hoy": "Inv. hoy",
+            "edad_pond_teorica": "Edad pond. teórica", "edad_hoy": "Edad pond. real",
+            "delta_edad": "Δ edad", "unds_varadas": "Unds varadas", "ruptura": "¿Ruptura?",
+        })
+
+        def resalta_ruptura(row):
+            if row["¿Ruptura?"] == "SÍ":
+                return ["background-color:#FDEDEC;"] * len(row)
+            return [""] * len(row)
+
+        styler = (
+            t.style.apply(resalta_ruptura, axis=1)
+            .format({"Inv. ayer": "{:,.0f}", "Vendido": "{:,.0f}", "Inv. hoy": "{:,.0f}",
+                     "Unds varadas": "{:,.0f}", "Edad pond. teórica": "{:.1f}",
+                     "Edad pond. real": "{:.1f}", "Δ edad": "{:.1f}", "Item": "{:.0f}"})
+        )
+        st.dataframe(styler, use_container_width=True, hide_index=True, height=520)
+        st.caption(f"{len(t):,} combinaciones mostradas.")
+
+    # ===== TAB 3: SEGUIMIENTO AYER VS HOY =====
+    with tab3:
+        st.subheader("Seguimiento: ayer vs hoy")
+        st.caption(
+            "Formato de seguimiento rápido por destino e item: cantidad y edad de ayer, "
+            "cantidad y edad de hoy, y lo vendido en el día."
+        )
+
+        destinos = sorted(res["destino"].unique().tolist())
+        f_dest2 = st.multiselect("Destino (CEDI/Planta)", destinos, placeholder="Todos", key="seg_dest")
+
+        sub = res.copy()
+        if f_dest2:
+            sub = sub[sub["destino"].isin(f_dest2)]
+        sub = sub.sort_values(["destino", "edad_hoy"], ascending=[True, False])
+
+        cols = ["destino", "item", "referencia", "cant_ayer", "edad_ayer",
+                "cant_hoy", "edad_hoy", "vendido"]
+        t = sub[cols].copy()
+        t["item"] = pd.to_numeric(t["item"], errors="coerce").astype("Int64")
+        t = t.rename(columns={
+            "destino": "Destino", "item": "Item", "referencia": "Referencia",
+            "cant_ayer": "Cantidad ayer", "edad_ayer": "Edad ayer",
+            "cant_hoy": "Cantidad hoy", "edad_hoy": "Edad hoy", "vendido": "Vendido",
+        })
+
+        def color_edad_seg(val):
+            try:
+                v = float(val)
+            except (TypeError, ValueError):
+                return ""
+            if v <= 0:
+                return ""
+            if v <= 5:
+                return "background-color:#C6EFCE; color:#006100; font-weight:700;"
+            elif v <= 6:
+                return "background-color:#FFE08A; color:#7A5200; font-weight:700;"
+            elif v <= 9:
+                return "background-color:#FFB84D; color:#7A3E00; font-weight:800;"
+            return "background-color:#FF8A80; color:#7A0006; font-weight:800;"
+
+        styler = (
+            t.style
+            .map(color_edad_seg, subset=["Edad ayer", "Edad hoy"])
+            .format({"Cantidad ayer": "{:,.0f}", "Cantidad hoy": "{:,.0f}",
+                     "Vendido": "{:,.0f}", "Edad ayer": "{:.1f}", "Edad hoy": "{:.1f}",
+                     "Item": "{:.0f}"})
+        )
+        st.dataframe(styler, use_container_width=True, hide_index=True, height=560)
+        st.markdown(
+            "🟢 ≤5 días &nbsp;&nbsp; 🟡 6 días &nbsp;&nbsp; 🟠 7–9 días &nbsp;&nbsp; 🔴 10+ días "
+            "&nbsp;&nbsp;|&nbsp;&nbsp; *Edad* = edad promedio ponderada por cantidad."
+        )
+
+    # ----- Ventas no rastreables -----
+    with st.expander(f"⚠️ Ventas no rastreables ({no_map['cantidad'].sum():,.0f} unds sin destino)"):
+        st.caption(
+            "Ventas que no pudieron asignarse a un destino de inventario. Quedan fuera del análisis "
+            "PEPS hasta resolver el mapeo de estas bodegas."
+        )
+        nm = no_map.rename(columns={
+            "bodega_raw": "Bodega (descripción venta)", "motivo_map": "Motivo no-mapeo",
+            "cantidad": "Unds",
+        })
+        st.dataframe(
+            nm.style.format({"Unds": "{:,.0f}"}),
+            use_container_width=True, hide_index=True,
+        )
+
+    st.caption(
+        f"Fuentes: {ARCHIVO_AYER} (inicial ayer) · {ARCHIVO_VENTAS} (ventas del día) · "
+        f"{ARCHIVO_HOY} (inicial hoy) — hoja {HOJA_INV_ANALISIS}"
+    )
+
+
+# ===========================================================================
+# NAVEGACIÓN
+# ===========================================================================
+with st.sidebar:
+    st.markdown(f"<h2 style='color:{COLOR_PRIMARIO}; font-weight:900;'>🥚 Huevos Kikes</h2>",
+                unsafe_allow_html=True)
+    st.markdown("**Panel de Inventarios**")
+    modulo = st.radio(
+        "Módulo",
+        ["Inventario de Edades", "Análisis de Rotación PEPS"],
+        label_visibility="collapsed",
+    )
+    st.divider()
+    st.caption(
+        "Sube a la raíz del repositorio:\n\n"
+        f"• **{ARCHIVO_HOY}**\n\n"
+        f"• **{ARCHIVO_AYER}**\n\n"
+        f"• **{ARCHIVO_VENTAS}**"
+    )
+
+if modulo == "Inventario de Edades":
+    render_modulo_edades()
+else:
+    render_modulo_rotacion()
