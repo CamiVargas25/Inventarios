@@ -40,12 +40,37 @@ COLOR_TEXTO = "#1A1A1A"
 COLOR_CRITICO = "#D0021B"
 COLOR_ADV = "#F5A623"
 
-# Archivos esperados en la raíz del repositorio
-ARCHIVO_HOY = "Inventario Hoy.xlsx"
-ARCHIVO_AYER = "Inventario Ayer.xlsx"
-ARCHIVO_VENTAS = "ventas.xlsx"
+# Archivos esperados en la raíz del repositorio.
+# Se aceptan variantes con espacio o guion bajo (p.ej. "Inventario Hoy.xlsx"
+# o "Inventario_Hoy.xlsx") para no depender de cómo se suban al repo.
+import os
+
+
+def resolver_archivo(*nombres):
+    """Devuelve la primera ruta existente entre las variantes dadas.
+    Si ninguna existe, devuelve la primera (para que el mensaje de error la nombre)."""
+    for n in nombres:
+        if os.path.exists(n):
+            return n
+    return nombres[0]
+
+
+ARCHIVO_HOY = resolver_archivo("Inventario Hoy.xlsx", "Inventario_Hoy.xlsx")
+ARCHIVO_AYER = resolver_archivo("Inventario Ayer.xlsx", "Inventario_Ayer.xlsx")
+ARCHIVO_VENTAS = resolver_archivo("ventas.xlsx", "Ventas.xlsx", "VENTAS.xlsx")
 HOJA_EDADES_DASH = "INV. EDADES"   # hoja para el módulo 1 (dashboard de edades)
 HOJA_INV_ANALISIS = "INV. EDADES"  # hoja para el módulo 2 (análisis de rotación)
+
+
+def mtime(ruta: str) -> float:
+    """Fecha de última modificación del archivo. Se usa como parte de la clave de
+    caché: si el archivo cambia (aunque conserve el nombre), el caché se invalida
+    y los datos se releen. Resuelve el problema de ver datos viejos tras reemplazar
+    un archivo en el repositorio."""
+    try:
+        return os.path.getmtime(ruta)
+    except OSError:
+        return 0.0
 
 # Estilos compartidos
 st.markdown(
@@ -164,7 +189,7 @@ def norm_item(serie: pd.Series) -> pd.Series:
 # MÓDULO 1 — DASHBOARD DE INVENTARIO DE EDADES  (sin cambios funcionales)
 # ===========================================================================
 @st.cache_data(ttl=3600)
-def cargar_datos_edades(ruta: str, hoja: str) -> pd.DataFrame:
+def cargar_datos_edades(ruta: str, hoja: str, cache_key: float = 0.0) -> pd.DataFrame:
     df = pd.read_excel(ruta, sheet_name=hoja)
     df.columns = [str(c).strip().lower() for c in df.columns]
     renombres = {}
@@ -181,7 +206,7 @@ def cargar_datos_edades(ruta: str, hoja: str) -> pd.DataFrame:
 
 def render_modulo_edades():
     try:
-        df = cargar_datos_edades(ARCHIVO_HOY, HOJA_EDADES_DASH)
+        df = cargar_datos_edades(ARCHIVO_HOY, HOJA_EDADES_DASH, mtime(ARCHIVO_HOY))
     except FileNotFoundError:
         st.error(
             f"No se encontró el archivo **{ARCHIVO_HOY}**. "
@@ -401,7 +426,7 @@ def map_bodega(desc):
 
 
 @st.cache_data(ttl=3600)
-def leer_inventario(ruta: str, hoja: str) -> pd.DataFrame:
+def leer_inventario(ruta: str, hoja: str, cache_key: float = 0.0) -> pd.DataFrame:
     """Lee la hoja INV. EDADES y devuelve columnas estandarizadas."""
     df = pd.read_excel(ruta, sheet_name=hoja)
     df.columns = [str(c).strip().lower() for c in df.columns]
@@ -421,7 +446,7 @@ def leer_inventario(ruta: str, hoja: str) -> pd.DataFrame:
 
 
 @st.cache_data(ttl=3600)
-def leer_fecha_corte(ruta: str, hoja: str):
+def leer_fecha_corte(ruta: str, hoja: str, cache_key: float = 0.0):
     """Lee la fecha de corte más reciente del inventario (columna 'Fecha').
 
     Se mantiene separada de leer_inventario porque st.cache_data no preserva
@@ -438,7 +463,7 @@ def leer_fecha_corte(ruta: str, hoja: str):
 
 
 @st.cache_data(ttl=3600)
-def leer_ventas(ruta: str) -> pd.DataFrame:
+def leer_ventas(ruta: str, cache_key: float = 0.0) -> pd.DataFrame:
     """Lee ventas, filtra línea HU y mapea bodega->destino."""
     raw = pd.read_excel(ruta, sheet_name=0)
     raw.columns = [str(c).strip().lower() for c in raw.columns]
@@ -586,15 +611,15 @@ def render_modulo_rotacion():
     # Carga
     faltantes = []
     try:
-        inv_ayer = leer_inventario(ARCHIVO_AYER, HOJA_INV_ANALISIS)
+        inv_ayer = leer_inventario(ARCHIVO_AYER, HOJA_INV_ANALISIS, mtime(ARCHIVO_AYER))
     except FileNotFoundError:
         faltantes.append(ARCHIVO_AYER)
     try:
-        inv_hoy = leer_inventario(ARCHIVO_HOY, HOJA_INV_ANALISIS)
+        inv_hoy = leer_inventario(ARCHIVO_HOY, HOJA_INV_ANALISIS, mtime(ARCHIVO_HOY))
     except FileNotFoundError:
         faltantes.append(ARCHIVO_HOY)
     try:
-        ventas = leer_ventas(ARCHIVO_VENTAS)
+        ventas = leer_ventas(ARCHIVO_VENTAS, mtime(ARCHIVO_VENTAS))
     except FileNotFoundError:
         faltantes.append(ARCHIVO_VENTAS)
 
@@ -607,20 +632,29 @@ def render_modulo_rotacion():
         st.stop()
 
     # --- Días transcurridos entre el corte de ayer y el de hoy ---
-    f_ayer = leer_fecha_corte(ARCHIVO_AYER, HOJA_INV_ANALISIS)
-    f_hoy = leer_fecha_corte(ARCHIVO_HOY, HOJA_INV_ANALISIS)
+    f_ayer = leer_fecha_corte(ARCHIVO_AYER, HOJA_INV_ANALISIS, mtime(ARCHIVO_AYER))
+    f_hoy = leer_fecha_corte(ARCHIVO_HOY, HOJA_INV_ANALISIS, mtime(ARCHIVO_HOY))
     dias = 1
     fechas_ok = (f_ayer is not None) and (f_hoy is not None)
     if fechas_ok:
         dias = int((f_hoy - f_ayer).days)
 
     # Validaciones de la ventana antes de correr el motor
-    if fechas_ok and dias <= 0:
+    if fechas_ok and dias < 0:
         st.error(
-            f"Las fechas de corte no son válidas para el análisis: "
-            f"**Ayer = {f_ayer.date()}**, **Hoy = {f_hoy.date()}**. "
-            "El inventario de hoy debe tener una fecha de corte posterior a la de ayer. "
-            "Revisa que no hayas intercambiado los archivos."
+            f"Las fechas de corte están invertidas: **Ayer = {f_ayer.date()}**, "
+            f"**Hoy = {f_hoy.date()}**. El inventario de hoy debe ser posterior al de ayer. "
+            "Parece que intercambiaste los archivos."
+        )
+        st.stop()
+
+    if fechas_ok and dias == 0:
+        st.error(
+            f"Ambos inventarios tienen la **misma fecha de corte ({f_hoy.date()})**, "
+            "así que no hay un período que analizar. Esto suele pasar por una de dos razones:\n\n"
+            "1. Subiste el mismo archivo (o una copia) en *Ayer* y *Hoy*.\n"
+            "2. Reemplazaste un archivo en el repositorio pero la app está mostrando datos "
+            "en caché. Usa el botón **🔄 Actualizar datos** del panel lateral y vuelve a intentar."
         )
         st.stop()
 
@@ -739,27 +773,28 @@ def render_modulo_rotacion():
                     c_real = r["vec_real"].get(e_hoy, 0)      # lo observado a esa edad envejecida
                     es_varado = (e_hoy > r["edad_max_teorica"] and c_real > 0
                                  and r["vendido"] < r["cant_ayer"])
-                    # Lectura en lenguaje de negocio
+                    # Estado: se juzga la rotación comparando REAL contra el TEÓRICO PEPS.
+                    # Solo se marca lo problemático (quedó más de lo que debía salir);
+                    # lo que rotó como esperado o mejor queda en blanco.
+                    margen = max(1.0, c_teo * 0.01)       # tolerancia para decimales
                     if es_varado:
                         estado = "⚠️ Varado (debió salir)"
-                    elif c_real <= 0.5 and c_ayer > 0:
-                        estado = "✅ Rotó completo"
-                    elif c_real < c_ayer - 0.5:
-                        estado = "🔄 Rotó parcial"
+                    elif c_real > c_teo + margen:
+                        estado = "⚠️ Quedó de más"
                     else:
-                        estado = "• En stock"
+                        estado = ""
                     filas_lote.append({
                         "Lote (edad ayer → hoy)": f"{e}d → {e_hoy}d",
                         "Cantidad ayer": c_ayer,
                         "Teórico hoy (PEPS)": c_teo,
                         "Real hoy": c_real,
                         "Estado del lote": estado,
-                        "_varado": es_varado,
+                        "_alerta": bool(estado),
                     })
                 df_lotes = pd.DataFrame(filas_lote)
 
                 def estilo_lote(row):
-                    base = "background-color:#FFE08A; font-weight:700;" if row["_varado"] else ""
+                    base = "background-color:#FFE08A; font-weight:700;" if row["_alerta"] else ""
                     return [base] * len(row)
 
                 st.markdown("**Lotes que venían de ayer**")
@@ -768,7 +803,7 @@ def render_modulo_rotacion():
                     .apply(estilo_lote, axis=1)
                     .format({"Cantidad ayer": "{:,.0f}", "Teórico hoy (PEPS)": "{:,.0f}",
                              "Real hoy": "{:,.0f}"})
-                    .hide(axis="columns", subset=["_varado"])
+                    .hide(axis="columns", subset=["_alerta"])
                 )
                 st.dataframe(styler_lotes, use_container_width=True, hide_index=True)
 
@@ -828,14 +863,14 @@ def render_modulo_rotacion():
                 c_real = r.vec_real.get(e_hoy, 0)
                 es_varado = (e_hoy > r.edad_max_teorica and c_real > 0
                              and r.vendido < r.cant_ayer and r.ruptura)
+                # Estado juzgado contra el teórico PEPS; solo se marca lo problemático.
+                margen = max(1.0, c_teo * 0.01)
                 if es_varado:
                     estado = "⚠️ Varado"
-                elif c_real <= 0.5 and c_ayer > 0:
-                    estado = "✅ Rotó completo"
-                elif c_real < c_ayer - 0.5:
-                    estado = "🔄 Rotó parcial"
+                elif c_real > c_teo + margen:
+                    estado = "⚠️ Quedó de más"
                 else:
-                    estado = "• En stock"
+                    estado = ""
                 registros.append({
                     "Destino": r.destino,
                     "Item": int(r.item) if str(r.item).isdigit() else r.item,
@@ -845,7 +880,7 @@ def render_modulo_rotacion():
                     "Teórico hoy": c_teo,
                     "Real hoy": c_real,
                     "Estado": estado,
-                    "_orden": 0, "_varado": es_varado,
+                    "_orden": 0, "_varado": es_varado or bool(estado),
                 })
             # 2) Entradas nuevas del período (edades reales que no vienen de ayer)
             edad_max_cohorte = max(edades_cohorte) if edades_cohorte else dias
@@ -894,7 +929,8 @@ def render_modulo_rotacion():
             st.dataframe(styler, use_container_width=True, hide_index=True, height=600)
             st.markdown(
                 "**Teórico hoy** = lo que PEPS dejaría de ese lote · **Real hoy** = lo observado.  "
-                "⚠️ Varado (fondo rojo) = lote viejo que debió salir · 🆕 entradas nuevas en gris."
+                "Solo se marca lo problemático: ⚠️ cuando quedó **más de lo que debía salir** "
+                "(real > teórico) · 🆕 entradas nuevas en gris. Las filas en blanco rotaron bien."
             )
             st.caption(f"{len(tabla):,} lotes mostrados.")
 
@@ -917,8 +953,12 @@ with st.sidebar:
         label_visibility="collapsed",
     )
     st.divider()
+    if st.button("🔄 Actualizar datos", use_container_width=True,
+                 help="Limpia el caché y vuelve a leer los archivos del repositorio."):
+        st.cache_data.clear()
+        st.rerun()
     st.caption(
-        "Sube a la raíz del repositorio:\n\n"
+        "Sube a la raíz del repositorio (con espacio o guion bajo):\n\n"
         f"• **{ARCHIVO_HOY}**\n\n"
         f"• **{ARCHIVO_AYER}**\n\n"
         f"• **{ARCHIVO_VENTAS}**"
