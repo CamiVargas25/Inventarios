@@ -540,27 +540,39 @@ def construir_analisis(inv_ayer, inv_hoy, ventas, dias=1):
         edad_max_teorica = max(teorico.keys()) if teorico else (max(va_env.keys()) if va_env else 0)
         edad_mas_vieja_ayer = max(va_env.keys()) if va_env else 0
 
-        # --- Detección de producto viejo varado ---
+        # --- Detección a nivel de cohorte: separa VARADO de INFLADO ---
+        # Recorremos solo las edades que YA existían ayer (cohortes reales), comparando
+        # la cohorte envejecida contra el teórico PEPS y contra lo que tenía ayer:
+        #   - exceso = real - teórico  (producto que debió salir y no salió)
+        #   - INFLADO: la cohorte creció respecto a ayer (real > ayer +10%): imposible
+        #     por envejecimiento, entró producto o hubo error de registro. No es rotación.
+        #   - VARADO: la cohorte es coherente con ayer pero quedó por encima del teórico:
+        #     rotación deficiente real.
+        # Las edades nuevas (que no venían de ayer) son entradas frescas: no se evalúan
+        # aquí, van a la sección de entradas nuevas.
+        UMBRAL_INFLADO = 1.10
         varado = 0.0
+        inflado = 0.0
         detalle_varado = []
-        if vendido >= tot_ayer - 0.5:
-            # Se vendió todo lo de ayer: lo de hoy es entrada nueva -> sin varado.
-            varado = 0.0
-        elif teorico:
-            for e, c in sorted(vh.items()):
-                if e > edad_max_teorica:
-                    varado += c
-                    detalle_varado.append((e, c))
-        else:
-            for e, c in sorted(vh.items()):
-                if e >= edad_mas_vieja_ayer and edad_mas_vieja_ayer > 0:
-                    varado += c
-                    detalle_varado.append((e, c))
+        if vendido < tot_ayer - 0.5:
+            for e_ayer, c_ayer_coh in va.items():
+                e_hoy_coh = e_ayer + dias
+                c_real = vh.get(e_hoy_coh, 0.0)
+                c_teo = teorico.get(e_hoy_coh, 0.0)
+                if c_real > c_ayer_coh * UMBRAL_INFLADO + 0.5:
+                    # La cohorte creció: imposible por envejecimiento -> inflado.
+                    inflado += c_real - c_ayer_coh
+                else:
+                    exceso = c_real - c_teo
+                    if exceso > 0.5:
+                        varado += exceso
+                        detalle_varado.append((e_hoy_coh, exceso))
 
         ep_teo = edad_ponderada(teorico)
         ep_real = edad_ponderada(vh)
         ep_ayer = edad_ponderada(va)
         ruptura = (varado > 0.5) and (vendido > 0)
+        hay_inflado = inflado > 0.5
 
         # Diagnóstico textual. Con una ventana de 'dias', un lote puede envejecer
         # legítimamente hasta +dias; solo un salto MAYOR a eso es anómalo.
@@ -586,6 +598,8 @@ def construir_analisis(inv_ayer, inv_hoy, ventas, dias=1):
             "delta_edad": round(ep_real - ep_teo, 1),
             "edad_max_teorica": edad_max_teorica,
             "unds_varadas": round(varado, 0),
+            "unds_infladas": round(inflado, 0),
+            "hay_inflado": hay_inflado,
             "faltante_peps": round(faltante, 0),
             "ruptura": ruptura, "diagnostico": diag,
             "vec_ayer": dict(va), "vec_teorico": dict(teorico), "vec_real": dict(vh),
@@ -682,6 +696,7 @@ def render_modulo_rotacion():
     # --- KPIs ---
     cob = ventas.dropna(subset=["destino"])["cantidad"].sum() / ventas["cantidad"].sum() * 100 \
         if ventas["cantidad"].sum() > 0 else 0
+    n_inflados = int(res["hay_inflado"].sum())
     k1, k2, k3, k4, k5 = st.columns(5)
     with k1:
         st.markdown(tarjeta_kpi("Rupturas de rotación", f"{len(rupturas):,}",
@@ -691,14 +706,20 @@ def render_modulo_rotacion():
         st.markdown(tarjeta_kpi("Unidades viejas varadas", f"{rupturas['unds_varadas'].sum():,.0f}",
                                 estado="critical"), unsafe_allow_html=True)
     with k3:
-        st.markdown(tarjeta_kpi("Combinaciones evaluadas", f"{len(res):,}", estado="neutral"),
+        st.markdown(tarjeta_kpi("Items con inventario inflado", f"{n_inflados:,}",
+                                estado="warning" if n_inflados else "neutral"),
                     unsafe_allow_html=True)
     with k4:
-        st.markdown(tarjeta_kpi("Con venta registrada", f"{(res['vendido'] > 0).sum():,}",
-                                estado="neutral"), unsafe_allow_html=True)
+        st.markdown(tarjeta_kpi("Combinaciones evaluadas", f"{len(res):,}", estado="neutral"),
+                    unsafe_allow_html=True)
     with k5:
         st.markdown(tarjeta_kpi("Cobertura de ventas", f"{cob:,.0f}%",
                                 estado="warning" if cob < 90 else "neutral"), unsafe_allow_html=True)
+    st.caption(
+        "**Inventario inflado** = lotes con más unidades hoy que ayer (físicamente imposible por "
+        "envejecimiento): apunta a ingreso no registrado o error de conteo, no a mala rotación. "
+        "No cuenta como ruptura."
+    )
 
     st.divider()
 
@@ -765,30 +786,42 @@ def render_modulo_rotacion():
 
                 # --- SECCIÓN 1: Lotes que ya existían ayer (su evolución) ---
                 edades_ayer = sorted(r["vec_ayer"].keys(), reverse=True)
+                vendio_todo = r["vendido"] >= r["cant_ayer"] - 0.5
                 filas_lote = []
                 for e in edades_ayer:
                     e_hoy = e + dias                      # edad de ese lote hoy
                     c_ayer = r["vec_ayer"].get(e, 0)
                     c_teo = r["vec_teorico"].get(e_hoy, 0)    # lo que PEPS dejaría
                     c_real = r["vec_real"].get(e_hoy, 0)      # lo observado a esa edad envejecida
-                    es_varado = (e_hoy > r["edad_max_teorica"] and c_real > 0
-                                 and r["vendido"] < r["cant_ayer"])
-                    # Ruptura = producto VIEJO que debió salir y se quedó varado.
-                    # Solo se marca eso; el resto (rotó bien, o quedó stock que aún no
-                    # tocaba vender) va en blanco, sin ruido.
-                    estado = "⚠️ Varado (debió salir)" if es_varado else ""
+                    # Exceso sobre el teórico = producto que debió salir y no salió.
+                    exceso = c_real - c_teo
+                    ayer_cohorte = c_ayer  # lo que tenía ayer esta misma cohorte
+                    es_inflado = (exceso > 0.5 and c_real > ayer_cohorte * 1.10 + 0.5
+                                  and not vendio_todo)
+                    es_varado = (exceso > 0.5 and not es_inflado and not vendio_todo)
+                    if es_inflado:
+                        estado = "📦 Inventario inflado (hoy > ayer)"
+                    elif es_varado:
+                        estado = "⚠️ Varado (debió salir)"
+                    else:
+                        estado = ""
                     filas_lote.append({
                         "Lote (edad ayer → hoy)": f"{e}d → {e_hoy}d",
                         "Cantidad ayer": c_ayer,
                         "Teórico hoy (PEPS)": c_teo,
                         "Real hoy": c_real,
                         "Estado del lote": estado,
-                        "_alerta": es_varado,
+                        "_color": "varado" if es_varado else ("inflado" if es_inflado else ""),
                     })
                 df_lotes = pd.DataFrame(filas_lote)
 
                 def estilo_lote(row):
-                    base = "background-color:#FFE08A; font-weight:700;" if row["_alerta"] else ""
+                    if row["_color"] == "varado":
+                        base = "background-color:#FFE08A; font-weight:700;"   # ámbar
+                    elif row["_color"] == "inflado":
+                        base = "background-color:#D6E9F8; font-weight:700;"   # azul claro
+                    else:
+                        base = ""
                     return [base] * len(row)
 
                 st.markdown("**Lotes que venían de ayer**")
@@ -797,7 +830,7 @@ def render_modulo_rotacion():
                     .apply(estilo_lote, axis=1)
                     .format({"Cantidad ayer": "{:,.0f}", "Teórico hoy (PEPS)": "{:,.0f}",
                              "Real hoy": "{:,.0f}"})
-                    .hide(axis="columns", subset=["_alerta"])
+                    .hide(axis="columns", subset=["_color"])
                 )
                 st.dataframe(styler_lotes, use_container_width=True, hide_index=True)
 
@@ -849,16 +882,25 @@ def render_modulo_rotacion():
         registros = []
         for r in sub.itertuples():
             edades_cohorte = {e + dias for e in r.vec_ayer.keys()}
+            vendio_todo = r.vendido >= r.cant_ayer - 0.5
             # 1) Lotes que venían de ayer
             for e in sorted(r.vec_ayer.keys(), reverse=True):
                 e_hoy = e + dias
                 c_ayer = r.vec_ayer.get(e, 0)
                 c_teo = r.vec_teorico.get(e_hoy, 0)
                 c_real = r.vec_real.get(e_hoy, 0)
-                es_varado = (e_hoy > r.edad_max_teorica and c_real > 0
-                             and r.vendido < r.cant_ayer and r.ruptura)
-                # Ruptura = solo producto viejo varado (orden PEPS); el resto en blanco.
-                estado = "⚠️ Varado" if es_varado else ""
+                exceso = c_real - c_teo
+                es_inflado = (exceso > 0.5 and c_real > c_ayer * 1.10 + 0.5 and not vendio_todo)
+                es_varado = (exceso > 0.5 and not es_inflado and not vendio_todo)
+                if es_inflado:
+                    estado = "📦 Inflado"
+                    color = "inflado"
+                elif es_varado:
+                    estado = "⚠️ Varado"
+                    color = "varado"
+                else:
+                    estado = ""
+                    color = ""
                 registros.append({
                     "Destino": r.destino,
                     "Item": int(r.item) if str(r.item).isdigit() else r.item,
@@ -868,7 +910,7 @@ def render_modulo_rotacion():
                     "Teórico hoy": c_teo,
                     "Real hoy": c_real,
                     "Estado": estado,
-                    "_orden": 0, "_varado": es_varado,
+                    "_orden": 0, "_color": color,
                 })
             # 2) Entradas nuevas del período (edades reales que no vienen de ayer)
             edad_max_cohorte = max(edades_cohorte) if edades_cohorte else dias
@@ -887,7 +929,7 @@ def render_modulo_rotacion():
                         "Teórico hoy": 0,
                         "Real hoy": c_real,
                         "Estado": "⚠️ Reaparecido (anómalo)" if anomala else "🆕 Entrada nueva",
-                        "_orden": 1, "_varado": anomala,
+                        "_orden": 1, "_color": "varado" if anomala else "nueva",
                     })
 
         if not registros:
@@ -899,27 +941,28 @@ def render_modulo_rotacion():
             ).reset_index(drop=True)
 
             def estilo_fila(row):
-                if row["_varado"]:
-                    return ["background-color:#FDEDEC;"] * len(row)
-                if row["Estado"] == "🆕 Entrada nueva":
+                if row["_color"] == "varado":
+                    return ["background-color:#FDEDEC;"] * len(row)          # rojo claro
+                if row["_color"] == "inflado":
+                    return ["background-color:#D6E9F8;"] * len(row)          # azul claro
+                if row["_color"] == "nueva":
                     return ["background-color:#F4F9F2; color:#4A4A4A;"] * len(row)
                 return [""] * len(row)
 
             vista_cols = ["Destino", "Item", "Referencia", "Lote (ayer → hoy)",
-                          "Cant. ayer", "Teórico hoy", "Real hoy", "Estado", "_varado"]
+                          "Cant. ayer", "Teórico hoy", "Real hoy", "Estado", "_color"]
             styler = (
                 tabla[vista_cols].style
                 .apply(estilo_fila, axis=1)
                 .format({"Cant. ayer": "{:,.0f}", "Teórico hoy": "{:,.0f}",
                          "Real hoy": "{:,.0f}", "Item": "{:.0f}"})
-                .hide(axis="columns", subset=["_varado"])
+                .hide(axis="columns", subset=["_color"])
             )
             st.dataframe(styler, use_container_width=True, hide_index=True, height=600)
             st.markdown(
-                "**Teórico hoy** = lo que PEPS dejaría de ese lote · **Real hoy** = lo observado.  "
-                "Solo se marca la ruptura real: ⚠️ **lote viejo varado** que debió salir y no salió "
-                "(salió producto más nuevo en su lugar) · 🆕 entradas nuevas en gris. "
-                "Las filas en blanco rotaron correctamente."
+                "⚠️ **Varado** (rojo) = lote viejo que debió salir y no salió → revisar rotación.  "
+                "📦 **Inflado** (azul) = hoy hay más que ayer, imposible por envejecimiento → "
+                "revisar ingreso o conteo.  🆕 Entradas nuevas en verde.  Filas en blanco rotaron bien."
             )
             st.caption(f"{len(tabla):,} lotes mostrados.")
 
