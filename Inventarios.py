@@ -773,23 +773,17 @@ def render_modulo_rotacion():
                     c_real = r["vec_real"].get(e_hoy, 0)      # lo observado a esa edad envejecida
                     es_varado = (e_hoy > r["edad_max_teorica"] and c_real > 0
                                  and r["vendido"] < r["cant_ayer"])
-                    # Estado: se juzga la rotación comparando REAL contra el TEÓRICO PEPS.
-                    # Solo se marca lo problemático (quedó más de lo que debía salir);
-                    # lo que rotó como esperado o mejor queda en blanco.
-                    margen = max(1.0, c_teo * 0.01)       # tolerancia para decimales
-                    if es_varado:
-                        estado = "⚠️ Varado (debió salir)"
-                    elif c_real > c_teo + margen:
-                        estado = "⚠️ Quedó de más"
-                    else:
-                        estado = ""
+                    # Ruptura = producto VIEJO que debió salir y se quedó varado.
+                    # Solo se marca eso; el resto (rotó bien, o quedó stock que aún no
+                    # tocaba vender) va en blanco, sin ruido.
+                    estado = "⚠️ Varado (debió salir)" if es_varado else ""
                     filas_lote.append({
                         "Lote (edad ayer → hoy)": f"{e}d → {e_hoy}d",
                         "Cantidad ayer": c_ayer,
                         "Teórico hoy (PEPS)": c_teo,
                         "Real hoy": c_real,
                         "Estado del lote": estado,
-                        "_alerta": bool(estado),
+                        "_alerta": es_varado,
                     })
                 df_lotes = pd.DataFrame(filas_lote)
 
@@ -863,14 +857,8 @@ def render_modulo_rotacion():
                 c_real = r.vec_real.get(e_hoy, 0)
                 es_varado = (e_hoy > r.edad_max_teorica and c_real > 0
                              and r.vendido < r.cant_ayer and r.ruptura)
-                # Estado juzgado contra el teórico PEPS; solo se marca lo problemático.
-                margen = max(1.0, c_teo * 0.01)
-                if es_varado:
-                    estado = "⚠️ Varado"
-                elif c_real > c_teo + margen:
-                    estado = "⚠️ Quedó de más"
-                else:
-                    estado = ""
+                # Ruptura = solo producto viejo varado (orden PEPS); el resto en blanco.
+                estado = "⚠️ Varado" if es_varado else ""
                 registros.append({
                     "Destino": r.destino,
                     "Item": int(r.item) if str(r.item).isdigit() else r.item,
@@ -880,7 +868,7 @@ def render_modulo_rotacion():
                     "Teórico hoy": c_teo,
                     "Real hoy": c_real,
                     "Estado": estado,
-                    "_orden": 0, "_varado": es_varado or bool(estado),
+                    "_orden": 0, "_varado": es_varado,
                 })
             # 2) Entradas nuevas del período (edades reales que no vienen de ayer)
             edad_max_cohorte = max(edades_cohorte) if edades_cohorte else dias
@@ -929,8 +917,9 @@ def render_modulo_rotacion():
             st.dataframe(styler, use_container_width=True, hide_index=True, height=600)
             st.markdown(
                 "**Teórico hoy** = lo que PEPS dejaría de ese lote · **Real hoy** = lo observado.  "
-                "Solo se marca lo problemático: ⚠️ cuando quedó **más de lo que debía salir** "
-                "(real > teórico) · 🆕 entradas nuevas en gris. Las filas en blanco rotaron bien."
+                "Solo se marca la ruptura real: ⚠️ **lote viejo varado** que debió salir y no salió "
+                "(salió producto más nuevo en su lugar) · 🆕 entradas nuevas en gris. "
+                "Las filas en blanco rotaron correctamente."
             )
             st.caption(f"{len(tabla):,} lotes mostrados.")
 
