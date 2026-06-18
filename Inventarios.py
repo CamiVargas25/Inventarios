@@ -541,19 +541,25 @@ def construir_analisis(inv_ayer, inv_hoy, ventas, dias=1):
         edad_mas_vieja_ayer = max(va_env.keys()) if va_env else 0
 
         # --- Detección a nivel de cohorte: separa VARADO de INFLADO ---
-        # Recorremos solo las edades que YA existían ayer (cohortes reales), comparando
-        # la cohorte envejecida contra el teórico PEPS y contra lo que tenía ayer:
-        #   - exceso = real - teórico  (producto que debió salir y no salió)
+        # Recorremos solo las edades que YA existían ayer (cohortes reales).
         #   - INFLADO: la cohorte creció respecto a ayer (real > ayer +10%): imposible
         #     por envejecimiento, entró producto o hubo error de registro. No es rotación.
-        #   - VARADO: la cohorte es coherente con ayer pero quedó por encima del teórico:
-        #     rotación deficiente real.
-        # Las edades nuevas (que no venían de ayer) son entradas frescas: no se evalúan
-        # aquí, van a la sección de entradas nuevas.
+        #   - VARADO (ruptura de ORDEN PEPS): un lote VIEJO quedó con exceso sobre su
+        #     teórico Y, al mismo tiempo, salió (rotó) producto de un lote MÁS NUEVO.
+        #     Esa es la verdadera inversión de orden. Si lo más viejo se agotó, o si solo
+        #     hay un lote, NO es ruptura (el excedente suele ser producto a bordo de los
+        #     vehículos: sugeridos + stock del vehículo, que el modelo no rastrea por edad).
         UMBRAL_INFLADO = 1.10
         varado = 0.0
         inflado = 0.0
         detalle_varado = []
+
+        # Cuánto salió (rotó) de cada cohorte = max(0, ayer_envejecido - real).
+        # Una cohorte "más nueva" que rotó es la que tiene MENOR edad y salida > 0.
+        salida_por_edad = {}
+        for e_hoy_coh in va_env.keys():
+            salida_por_edad[e_hoy_coh] = max(0.0, va_env.get(e_hoy_coh, 0.0) - vh.get(e_hoy_coh, 0.0))
+
         if vendido < tot_ayer - 0.5:
             for e_ayer, c_ayer_coh in va.items():
                 e_hoy_coh = e_ayer + dias
@@ -562,11 +568,20 @@ def construir_analisis(inv_ayer, inv_hoy, ventas, dias=1):
                 if c_real > c_ayer_coh * UMBRAL_INFLADO + 0.5:
                     # La cohorte creció: imposible por envejecimiento -> inflado.
                     inflado += c_real - c_ayer_coh
-                else:
-                    exceso = c_real - c_teo
-                    if exceso > 0.5:
-                        varado += exceso
-                        detalle_varado.append((e_hoy_coh, exceso))
+                    continue
+                exceso = c_real - c_teo
+                if exceso <= 0.5:
+                    continue
+                # ¿Salió producto de algún lote MÁS NUEVO que este (edad menor)?
+                rotó_un_lote_mas_nuevo = any(
+                    e_otro < e_hoy_coh and sal > 0.5
+                    for e_otro, sal in salida_por_edad.items()
+                )
+                if rotó_un_lote_mas_nuevo:
+                    varado += exceso            # ruptura de orden real
+                    detalle_varado.append((e_hoy_coh, exceso))
+                # Si NO rotó nada más nuevo, el exceso es producto a bordo / no rotación:
+                # no se cuenta como varado.
 
         ep_teo = edad_ponderada(teorico)
         ep_real = edad_ponderada(vh)
@@ -589,6 +604,16 @@ def construir_analisis(inv_ayer, inv_hoy, ventas, dias=1):
         else:
             diag = "Producto antiguo permanece pese a haber ventas del día"
 
+        # Conjuntos de edades (hoy) clasificadas, para que las tablas usen exactamente
+        # el mismo criterio que el motor (incluida la condición de inversión de orden).
+        edades_varadas = {e for e, _ in detalle_varado}
+        edades_infladas = set()
+        if vendido < tot_ayer - 0.5:
+            for e_ayer, c_ayer_coh in va.items():
+                e_hoy_coh = e_ayer + dias
+                if vh.get(e_hoy_coh, 0.0) > c_ayer_coh * UMBRAL_INFLADO + 0.5:
+                    edades_infladas.add(e_hoy_coh)
+
         filas.append({
             "destino": dest, "item": item, "referencia": ref_map.get(item, ""),
             "cant_ayer": tot_ayer, "edad_ayer": round(ep_ayer, 1),
@@ -600,6 +625,8 @@ def construir_analisis(inv_ayer, inv_hoy, ventas, dias=1):
             "unds_varadas": round(varado, 0),
             "unds_infladas": round(inflado, 0),
             "hay_inflado": hay_inflado,
+            "edades_varadas": edades_varadas,
+            "edades_infladas": edades_infladas,
             "faltante_peps": round(faltante, 0),
             "ruptura": ruptura, "diagnostico": diag,
             "vec_ayer": dict(va), "vec_teorico": dict(teorico), "vec_real": dict(vh),
@@ -793,12 +820,10 @@ def render_modulo_rotacion():
                     c_ayer = r["vec_ayer"].get(e, 0)
                     c_teo = r["vec_teorico"].get(e_hoy, 0)    # lo que PEPS dejaría
                     c_real = r["vec_real"].get(e_hoy, 0)      # lo observado a esa edad envejecida
-                    # Exceso sobre el teórico = producto que debió salir y no salió.
-                    exceso = c_real - c_teo
-                    ayer_cohorte = c_ayer  # lo que tenía ayer esta misma cohorte
-                    es_inflado = (exceso > 0.5 and c_real > ayer_cohorte * 1.10 + 0.5
-                                  and not vendio_todo)
-                    es_varado = (exceso > 0.5 and not es_inflado and not vendio_todo)
+                    # Clasificación tomada del motor (mismo criterio, incluida la
+                    # condición de inversión de orden para el varado).
+                    es_inflado = e_hoy in r["edades_infladas"]
+                    es_varado = e_hoy in r["edades_varadas"]
                     if es_inflado:
                         estado = "📦 Inventario inflado (hoy > ayer)"
                     elif es_varado:
@@ -889,9 +914,8 @@ def render_modulo_rotacion():
                 c_ayer = r.vec_ayer.get(e, 0)
                 c_teo = r.vec_teorico.get(e_hoy, 0)
                 c_real = r.vec_real.get(e_hoy, 0)
-                exceso = c_real - c_teo
-                es_inflado = (exceso > 0.5 and c_real > c_ayer * 1.10 + 0.5 and not vendio_todo)
-                es_varado = (exceso > 0.5 and not es_inflado and not vendio_todo)
+                es_inflado = e_hoy in r.edades_infladas
+                es_varado = e_hoy in r.edades_varadas
                 if es_inflado:
                     estado = "📦 Inflado"
                     color = "inflado"
