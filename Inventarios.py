@@ -721,10 +721,7 @@ def render_modulo_rotacion():
         )
 
     # --- KPIs ---
-    cob = ventas.dropna(subset=["destino"])["cantidad"].sum() / ventas["cantidad"].sum() * 100 \
-        if ventas["cantidad"].sum() > 0 else 0
-    n_inflados = int(res["hay_inflado"].sum())
-    k1, k2, k3, k4, k5 = st.columns(5)
+    k1, k2 = st.columns(2)
     with k1:
         st.markdown(tarjeta_kpi("Rupturas de rotación", f"{len(rupturas):,}",
                                 estado="critical" if len(rupturas) else "neutral", reina=True),
@@ -732,21 +729,6 @@ def render_modulo_rotacion():
     with k2:
         st.markdown(tarjeta_kpi("Unidades viejas varadas", f"{rupturas['unds_varadas'].sum():,.0f}",
                                 estado="critical"), unsafe_allow_html=True)
-    with k3:
-        st.markdown(tarjeta_kpi("Items con inventario inflado", f"{n_inflados:,}",
-                                estado="warning" if n_inflados else "neutral"),
-                    unsafe_allow_html=True)
-    with k4:
-        st.markdown(tarjeta_kpi("Combinaciones evaluadas", f"{len(res):,}", estado="neutral"),
-                    unsafe_allow_html=True)
-    with k5:
-        st.markdown(tarjeta_kpi("Cobertura de ventas", f"{cob:,.0f}%",
-                                estado="warning" if cob < 90 else "neutral"), unsafe_allow_html=True)
-    st.caption(
-        "**Inventario inflado** = lotes con más unidades hoy que ayer (físicamente imposible por "
-        "envejecimiento): apunta a ingreso no registrado o error de conteo, no a mala rotación. "
-        "No cuenta como ruptura."
-    )
 
     st.divider()
 
