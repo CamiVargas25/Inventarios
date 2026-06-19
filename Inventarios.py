@@ -186,6 +186,152 @@ def norm_item(serie: pd.Series) -> pd.Series:
 
 
 # ===========================================================================
+# BASE DE DATOS DE GESTIÓN DE RUPTURAS  (backend: Google Sheets)
+# ===========================================================================
+# La persistencia vive FUERA del repositorio porque el sistema de archivos de
+# Streamlit Cloud es efímero. Usamos un Google Sheet como base de datos:
+#   - hoja 'rupturas'  : registro automático e idempotente de las rupturas por fecha
+#   - hoja 'gestiones' : explicaciones que el líder de zona consigna desde la app
+#
+# El usuario NUNCA abre Google Sheets: interactúa solo con el dashboard. El Sheet
+# es el almacén invisible (y tu ventana de administración como dueña del proceso).
+
+import datetime as _dt
+
+# Categorías de causa disponibles para el líder (definidas con Camila).
+CATEGORIAS_RUPTURA = [
+    "Producto en vehículo (sugerido/stock a bordo)",
+    "Error de conteo / registro",
+    "Reingreso o devolución",
+    "Otra",
+]
+
+HOJA_RUPTURAS = "rupturas"
+HOJA_GESTIONES = "gestiones"
+
+COLS_RUPTURAS = ["llave", "fecha_corte", "fecha_registro", "destino", "item",
+                 "referencia", "unds_varadas"]
+COLS_GESTIONES = ["llave", "fecha_corte", "destino", "item", "lider_zona",
+                  "categoria", "razon", "accion_correctiva", "fecha_gestion"]
+
+
+def llave_ruptura(fecha_corte, destino, item):
+    """Identidad estable de una ruptura: fecha de corte + destino + item."""
+    return f"{fecha_corte}|{destino}|{item}"
+
+
+@st.cache_resource(show_spinner=False)
+def _conectar_sheet():
+    """Abre el Google Sheet de la BD. Devuelve el objeto Spreadsheet o None si no
+    hay credenciales configuradas (modo sin BD). Usa st.secrets para las
+    credenciales de la cuenta de servicio (nunca van al repositorio)."""
+    try:
+        import gspread
+        from google.oauth2.service_account import Credentials
+    except Exception:
+        return None
+    if "gcp_service_account" not in st.secrets or "sheet_bd" not in st.secrets:
+        return None
+    try:
+        scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+        creds = Credentials.from_service_account_info(
+            dict(st.secrets["gcp_service_account"]), scopes=scopes)
+        gc = gspread.authorize(creds)
+        sh = gc.open_by_key(st.secrets["sheet_bd"]["spreadsheet_id"])
+        return sh
+    except Exception as e:
+        st.session_state["_bd_error"] = str(e)
+        return None
+
+
+def _hoja(sh, nombre, cols):
+    """Devuelve la worksheet, creándola con encabezados si no existe."""
+    try:
+        ws = sh.worksheet(nombre)
+    except Exception:
+        ws = sh.add_worksheet(title=nombre, rows=1000, cols=max(10, len(cols)))
+        ws.append_row(cols)
+    # Asegura encabezados si la hoja está vacía
+    if not ws.row_values(1):
+        ws.append_row(cols)
+    return ws
+
+
+def bd_disponible():
+    return _conectar_sheet() is not None
+
+
+def leer_tabla(nombre, cols):
+    """Lee una hoja completa como DataFrame. Devuelve df vacío si no hay BD."""
+    sh = _conectar_sheet()
+    if sh is None:
+        return pd.DataFrame(columns=cols)
+    try:
+        ws = _hoja(sh, nombre, cols)
+        registros = ws.get_all_records()
+        df = pd.DataFrame(registros)
+        if df.empty:
+            return pd.DataFrame(columns=cols)
+        for c in cols:
+            if c not in df.columns:
+                df[c] = None
+        return df[cols]
+    except Exception as e:
+        st.session_state["_bd_error"] = str(e)
+        return pd.DataFrame(columns=cols)
+
+
+def registrar_rupturas(rupturas_df, fecha_corte):
+    """Registro AUTOMÁTICO e IDEMPOTENTE de las rupturas de una fecha de corte.
+    Si ya existe registro para esa fecha, no hace nada (respeta lo congelado).
+    Devuelve (n_registradas, ya_existia)."""
+    sh = _conectar_sheet()
+    if sh is None:
+        return 0, False
+    fc = str(fecha_corte)
+    try:
+        ws = _hoja(sh, HOJA_RUPTURAS, COLS_RUPTURAS)
+        existentes = pd.DataFrame(ws.get_all_records())
+        # ¿Ya se congeló esta fecha de corte?
+        if not existentes.empty and "fecha_corte" in existentes.columns:
+            if (existentes["fecha_corte"].astype(str) == fc).any():
+                return 0, True
+        if rupturas_df.empty:
+            return 0, False
+        hoy = _dt.date.today().isoformat()
+        filas = []
+        for r in rupturas_df.itertuples():
+            filas.append([
+                llave_ruptura(fc, r.destino, r.item),
+                fc, hoy, r.destino, str(r.item), r.referencia,
+                int(round(r.unds_varadas)),
+            ])
+        ws.append_rows(filas, value_input_option="USER_ENTERED")
+        return len(filas), False
+    except Exception as e:
+        st.session_state["_bd_error"] = str(e)
+        return 0, False
+
+
+def guardar_gestion(llave, fecha_corte, destino, item, lider, categoria,
+                    razon, accion):
+    """Consigna la explicación del líder para una ruptura. Devuelve True/False."""
+    sh = _conectar_sheet()
+    if sh is None:
+        return False
+    try:
+        ws = _hoja(sh, HOJA_GESTIONES, COLS_GESTIONES)
+        ws.append_row([
+            llave, str(fecha_corte), destino, str(item), lider, categoria,
+            razon, accion, _dt.datetime.now().isoformat(timespec="seconds"),
+        ], value_input_option="USER_ENTERED")
+        return True
+    except Exception as e:
+        st.session_state["_bd_error"] = str(e)
+        return False
+
+
+# ===========================================================================
 # MÓDULO 1 — DASHBOARD DE INVENTARIO DE EDADES  (sin cambios funcionales)
 # ===========================================================================
 @st.cache_data(ttl=3600)
@@ -462,9 +608,16 @@ def leer_fecha_corte(ruta: str, hoja: str, cache_key: float = 0.0):
     return fechas.max().normalize()
 
 
+def es_pet(descripcion):
+    """Categoriza un SKU: PET si la descripción contiene 'PET', si no SUELTO."""
+    return "PET" if "PET" in str(descripcion).upper() else "SUELTO"
+
+
 @st.cache_data(ttl=3600)
 def leer_ventas(ruta: str, cache_key: float = 0.0) -> pd.DataFrame:
-    """Lee ventas, filtra línea HU y mapea bodega->destino."""
+    """Lee ventas, filtra línea HU, mapea bodega->destino, categoriza PET/SUELTO
+    y extrae la fecha de venta (columna fec_venta). El archivo puede contener
+    varios días."""
     raw = pd.read_excel(ruta, sheet_name=0)
     raw.columns = [str(c).strip().lower() for c in raw.columns]
     df = raw[raw["codigo_linea"] == "HU"].copy()
@@ -474,7 +627,80 @@ def leer_ventas(ruta: str, cache_key: float = 0.0) -> pd.DataFrame:
     df["destino"] = mapeo.apply(lambda t: t[0])
     df["motivo_map"] = mapeo.apply(lambda t: t[1])
     df["bodega_raw"] = df["descripcion"]
-    return df[["item", "cantidad", "destino", "motivo_map", "bodega_raw"]]
+    df["categoria"] = df["descripcion_articulo"].apply(es_pet)
+    # Fecha de venta (columna fec_venta). Puede haber varios días en el archivo.
+    df["fecha_venta"] = pd.to_datetime(df.get("fec_venta"), errors="coerce").dt.date
+    return df[["item", "cantidad", "destino", "motivo_map", "bodega_raw",
+               "categoria", "fecha_venta"]]
+
+
+def preparar_ventas_peps(ventas, fecha_corte_hoy, dias):
+    """Construye la venta que alimentará el teórico PEPS por (destino, item):
+       - SUELTO: promedio diario (total ÷ días calendario del rango) × días de ventana.
+       - PET: venta exacta del día analizado (= fecha de corte 'hoy').
+    Devuelve (dict {(destino,item): venta_peps}, dict {(destino,item): categoria},
+              dict {(destino,item): venta_diaria}, n_dias_rango).
+    'venta_diaria' es el ritmo por día (promedio para SUELTO; venta del día para PET),
+    usado en la alerta de vida útil."""
+    ven_ok = ventas.dropna(subset=["destino"]).copy()
+    # Número de días calendario distintos en el archivo de ventas
+    dias_rango = ven_ok["fecha_venta"].dropna().nunique()
+    if dias_rango == 0:
+        dias_rango = 1
+
+    # Categoría dominante por (destino, item) — un SKU es PET o SUELTO de forma estable
+    cat_map = (ven_ok.groupby(["destino", "item"])["categoria"]
+               .agg(lambda s: "PET" if (s == "PET").any() else "SUELTO").to_dict())
+
+    venta_peps = {}
+    venta_diaria = {}
+    for (dest, item), cat in cat_map.items():
+        sub = ven_ok[(ven_ok["destino"] == dest) & (ven_ok["item"] == item)]
+        total = sub["cantidad"].sum()
+        if cat == "SUELTO":
+            prom = total / dias_rango                 # promedio diario
+            venta_diaria[(dest, item)] = prom
+            venta_peps[(dest, item)] = prom * dias    # ventana del análisis
+        else:  # PET: venta exacta del día = fecha de corte 'hoy'
+            vdia = sub[sub["fecha_venta"] == fecha_corte_hoy]["cantidad"].sum()
+            venta_diaria[(dest, item)] = vdia
+            venta_peps[(dest, item)] = vdia
+    return venta_peps, cat_map, venta_diaria, dias_rango
+
+
+def proyectar_vida_util(inv_vec, venta_diaria, umbral=5):
+    """Proyección PEPS lote por lote: con la venta diaria, ¿algún lote cruzará el
+    umbral de vida útil antes de venderse? Lo viejo sale primero, así que cada lote
+    espera a que se vendan los más viejos.
+    inv_vec: dict edad->cantidad (inventario actual del SKU/destino).
+    Devuelve (en_riesgo: bool, edad_max_proyectada: float, detalle: list).
+    """
+    if venta_diaria <= 0 or not inv_vec:
+        return False, 0.0, []
+    acumulado = 0.0
+    detalle = []
+    en_riesgo = False
+    edad_max_proy = 0.0
+    # PEPS: procesar de más viejo a más nuevo
+    for edad in sorted(inv_vec.keys(), reverse=True):
+        cant = inv_vec[edad]
+        if cant <= 0:
+            continue
+        acumulado += cant
+        # Días hasta agotar este lote (incluye esperar los más viejos ya sumados)
+        dias_hasta_agotar = acumulado / venta_diaria
+        edad_proyectada = edad + dias_hasta_agotar
+        edad_max_proy = max(edad_max_proy, edad_proyectada)
+        riesgo_lote = edad_proyectada > umbral
+        if riesgo_lote:
+            en_riesgo = True
+        detalle.append({
+            "edad_actual": edad, "cantidad": cant,
+            "dias_para_vender": round(dias_hasta_agotar, 1),
+            "edad_proyectada": round(edad_proyectada, 1),
+            "riesgo": riesgo_lote,
+        })
+    return en_riesgo, round(edad_max_proy, 1), detalle
 
 
 def vec_por_edad(df, dest, item):
@@ -505,17 +731,28 @@ def peps_consumir(inv_envejecido, vendido):
     return rem, restante
 
 
-@st.cache_data(ttl=3600)
-def construir_analisis(inv_ayer, inv_hoy, ventas, dias=1):
+def construir_analisis(inv_ayer, inv_hoy, ventas, dias=1, venta_peps=None, cat_map=None):
     """Motor PEPS consciente de los días transcurridos.
 
     'dias' es el número de días entre el corte de inv_ayer y el de inv_hoy
     (1 en un día normal; 3 tras un puente). Cada lote del inventario inicial
     se envejece +dias antes de consumir las ventas por PEPS.
+
+    venta_peps: dict {(destino,item): venta} a usar en el teórico PEPS. Para SUELTO
+    es el promedio diario × días de ventana; para PET la venta exacta del día. Si es
+    None, se usa la venta total del archivo (comportamiento anterior).
+    cat_map: dict {(destino,item): 'PET'|'SUELTO'} para etiquetar cada resultado.
     """
     dias = max(1, int(dias))
     ven_ok = ventas.dropna(subset=["destino"])
-    ven_map = ven_ok.groupby(["destino", "item"])["cantidad"].sum().to_dict()
+    # Venta que alimenta el teórico PEPS: si se pasa venta_peps (promedio para SUELTO,
+    # venta exacta del día para PET) se usa esa; si no, cae a la venta total (compat.).
+    if venta_peps is None:
+        ven_map = ven_ok.groupby(["destino", "item"])["cantidad"].sum().to_dict()
+    else:
+        ven_map = venta_peps
+    if cat_map is None:
+        cat_map = {}
 
     ref_map = {}
     for df in (inv_ayer, inv_hoy):
@@ -616,6 +853,7 @@ def construir_analisis(inv_ayer, inv_hoy, ventas, dias=1):
 
         filas.append({
             "destino": dest, "item": item, "referencia": ref_map.get(item, ""),
+            "categoria": cat_map.get((dest, item), "SUELTO"),
             "cant_ayer": tot_ayer, "edad_ayer": round(ep_ayer, 1),
             "vendido": vendido,
             "cant_hoy": tot_hoy, "edad_hoy": round(ep_real, 1),
@@ -705,8 +943,35 @@ def render_modulo_rotacion():
             "Asumiré **1 día** de diferencia; si vienes de un puente, los resultados no serán confiables."
         )
 
-    res, no_map = construir_analisis(inv_ayer, inv_hoy, ventas, dias=dias)
-    rupturas = res[res["ruptura"]]
+    # Fecha de corte 'hoy' (la del inventario de hoy). Para PET, su venta exacta
+    # se toma de este día dentro del archivo de ventas.
+    fecha_corte_obj = f_hoy.date() if fechas_ok else _dt.date.today()
+    fecha_corte_hoy = fecha_corte_obj.isoformat()
+
+    # Venta para el teórico PEPS: SUELTO usa promedio diario; PET la venta del día.
+    venta_peps, cat_map, venta_diaria, dias_rango = preparar_ventas_peps(
+        ventas, fecha_corte_obj, dias)
+
+    res, no_map = construir_analisis(inv_ayer, inv_hoy, ventas, dias=dias,
+                                     venta_peps=venta_peps, cat_map=cat_map)
+    rupturas = res[res["ruptura"]].copy()
+
+    if dias_rango > 1:
+        st.info(
+            f"📅 El archivo de ventas cubre **{dias_rango} días**. Para productos "
+            "**SUELTO** se usa el promedio de venta diaria; para **PET**, la venta "
+            f"exacta del día de corte ({fecha_corte_hoy})."
+        )
+
+    # --- Registro automático e idempotente a la BD ---
+    # La primera vez que se corre el análisis para esta fecha de corte, las rupturas
+    # quedan congeladas en la BD. Reaperturas el mismo día no duplican ni recalculan.
+    if bd_disponible():
+        n_reg, ya_existia = registrar_rupturas(rupturas, fecha_corte_hoy)
+        if n_reg > 0:
+            st.success(f"✅ {n_reg} ruptura(s) del corte {fecha_corte_hoy} registradas en seguimiento.")
+    # Guardamos para que el formulario y el módulo de seguimiento los reutilicen
+    st.session_state["_fecha_corte_actual"] = fecha_corte_hoy
 
     # Aviso de ventana multi-día
     if dias > 1:
@@ -733,8 +998,9 @@ def render_modulo_rotacion():
     st.divider()
 
     # ----- Sub-secciones por pestañas -----
-    tab1, tab2 = st.tabs(
-        ["🚨 Rupturas PEPS", "📋 Detalle por destino (ayer vs hoy)"]
+    tab1, tab2, tab3 = st.tabs(
+        ["🚨 Rupturas PEPS", "📋 Detalle por destino (ayer vs hoy)",
+         "⏳ Riesgo de vida útil"]
     )
 
     # ===== TAB 1: RUPTURAS PEPS =====
@@ -862,6 +1128,61 @@ def render_modulo_rotacion():
                         use_container_width=True, hide_index=True,
                     )
 
+        # ----- Formulario del líder de zona: explicar una ruptura -----
+        st.divider()
+        st.markdown("#### 📝 Registrar explicación de una ruptura")
+        if not bd_disponible():
+            st.info(
+                "La base de datos de seguimiento no está configurada todavía. "
+                "Cuando se conecte el Google Sheet, aquí el líder de zona podrá explicar "
+                "cada ruptura y alimentar el módulo de seguimiento."
+            )
+        elif rupturas.empty:
+            st.success("No hay rupturas de rotación en este corte para explicar. 🎉")
+        else:
+            fecha_corte_act = st.session_state.get("_fecha_corte_actual", fecha_corte_hoy)
+            gestiones = leer_tabla(HOJA_GESTIONES, COLS_GESTIONES)
+            llaves_gestionadas = set(gestiones["llave"].astype(str)) if not gestiones.empty else set()
+
+            # Rupturas pendientes (registradas hoy y aún sin explicación)
+            pendientes = []
+            for r in rupturas.itertuples():
+                lv = llave_ruptura(fecha_corte_act, r.destino, r.item)
+                if lv not in llaves_gestionadas:
+                    pendientes.append((lv, r.destino, r.item, r.referencia, r.unds_varadas))
+
+            if not pendientes:
+                st.success("Todas las rupturas de este corte ya fueron explicadas. ✅")
+            else:
+                etiquetas = [f"{d} — {it} — {ref} ({uv:,.0f} unds)"
+                             for (_, d, it, ref, uv) in pendientes]
+                sel_idx = st.selectbox(
+                    f"Rupturas pendientes de explicar ({len(pendientes)}):",
+                    range(len(pendientes)), format_func=lambda i: etiquetas[i],
+                )
+                lv, d_sel, it_sel, ref_sel, uv_sel = pendientes[sel_idx]
+
+                with st.form("form_gestion", clear_on_submit=True):
+                    lider = st.text_input("Líder de zona *", placeholder="Tu nombre completo")
+                    categoria = st.selectbox("Categoría de la causa *", CATEGORIAS_RUPTURA)
+                    razon = st.text_area("¿Por qué ocurrió la ruptura? *",
+                                         placeholder="Describe la causa concreta…")
+                    accion = st.text_area("Acción correctiva",
+                                          placeholder="¿Qué se hará para evitar que se repita? (opcional)")
+                    enviar = st.form_submit_button("Guardar explicación", use_container_width=True)
+                    if enviar:
+                        if not lider.strip() or not razon.strip():
+                            st.error("El nombre del líder y la razón son obligatorios.")
+                        else:
+                            ok = guardar_gestion(lv, fecha_corte_act, d_sel, it_sel,
+                                                 lider.strip(), categoria, razon.strip(),
+                                                 accion.strip())
+                            if ok:
+                                st.success("Explicación guardada. ¡Gracias! Se reflejará en el seguimiento.")
+                                st.rerun()
+                            else:
+                                st.error("No se pudo guardar. Revisa la conexión a la base de datos.")
+
     # ===== TAB 2: DETALLE POR DESTINO — UNA FILA POR LOTE (cohorte ayer → hoy) =====
     with tab2:
         st.subheader("Detalle por destino — seguimiento por lote")
@@ -972,10 +1293,226 @@ def render_modulo_rotacion():
             )
             st.caption(f"{len(tabla):,} lotes mostrados.")
 
+    # ===== TAB 3: RIESGO DE VIDA ÚTIL (proyección PEPS lote por lote) =====
+    with tab3:
+        st.subheader("Riesgo de superar 5 días de vida útil")
+        st.caption(
+            "Proyección a futuro: con el ritmo de venta diaria (promedio para SUELTO, "
+            "venta del día para PET) y la edad actual de cada lote, se estima la edad que "
+            "tendría al venderse bajo PEPS (lo más viejo primero, cada lote espera a los "
+            "anteriores). Se alerta si algún lote proyecta superar **5 días**."
+        )
+
+        UMBRAL_VIDA = 5
+        filas_riesgo = []
+        # Inventario de hoy por (destino, item)
+        claves_hoy = inv_hoy.groupby(["destino", "item"]).size().index.tolist()
+        for dest, item in claves_hoy:
+            vdiaria = venta_diaria.get((dest, item), 0.0)
+            inv_vec = vec_por_edad(inv_hoy, dest, item)
+            tot = sum(inv_vec.values())
+            if tot <= 0:
+                continue
+            en_riesgo, edad_max_proy, detalle = proyectar_vida_util(
+                inv_vec, vdiaria, umbral=UMBRAL_VIDA)
+            if vdiaria <= 0:
+                estado = "Sin venta (no proyectable)"
+            elif en_riesgo:
+                estado = "⚠️ En riesgo"
+            else:
+                estado = "✅ Rota a tiempo"
+            unds_riesgo = sum(d["cantidad"] for d in detalle if d["riesgo"])
+            ref = inv_hoy[(inv_hoy["destino"] == dest) & (inv_hoy["item"] == item)]["referencia"].iloc[0] \
+                if not inv_hoy[(inv_hoy["destino"] == dest) & (inv_hoy["item"] == item)].empty else ""
+            filas_riesgo.append({
+                "Destino": dest,
+                "Item": int(item) if str(item).isdigit() else item,
+                "Referencia": ref,
+                "Categoría": cat_map.get((dest, item), "SUELTO"),
+                "Inv. hoy": tot,
+                "Venta diaria": round(vdiaria, 0),
+                "Días cobertura": round(tot / vdiaria, 1) if vdiaria > 0 else None,
+                "Edad máx. proyectada": edad_max_proy if vdiaria > 0 else None,
+                "Unds en riesgo": round(unds_riesgo, 0),
+                "Estado": estado,
+                "_riesgo": en_riesgo,
+            })
+
+        df_riesgo = pd.DataFrame(filas_riesgo)
+        if df_riesgo.empty:
+            st.info("No hay inventario para proyectar.")
+        else:
+            n_riesgo = int(df_riesgo["_riesgo"].sum())
+            unds_tot_riesgo = df_riesgo.loc[df_riesgo["_riesgo"], "Unds en riesgo"].sum()
+            kr1, kr2 = st.columns(2)
+            with kr1:
+                st.markdown(tarjeta_kpi("SKU/destino en riesgo", f"{n_riesgo:,}",
+                                        estado="critical" if n_riesgo else "neutral", reina=True),
+                            unsafe_allow_html=True)
+            with kr2:
+                st.markdown(tarjeta_kpi("Unidades en riesgo", f"{unds_tot_riesgo:,.0f}",
+                                        estado="critical"), unsafe_allow_html=True)
+
+            st.divider()
+            cfa, cfb = st.columns([2, 1])
+            with cfa:
+                f_dest_r = st.multiselect("Destino", sorted(df_riesgo["Destino"].unique()),
+                                          placeholder="Todos", key="riesgo_dest")
+            with cfb:
+                solo_riesgo = st.toggle("Solo en riesgo", value=True, key="riesgo_toggle")
+
+            vista = df_riesgo.copy()
+            if f_dest_r:
+                vista = vista[vista["Destino"].isin(f_dest_r)]
+            if solo_riesgo:
+                vista = vista[vista["_riesgo"]]
+            vista = vista.sort_values(["_riesgo", "Edad máx. proyectada"],
+                                      ascending=[False, False])
+
+            def estilo_riesgo(row):
+                return (["background-color:#FDEDEC;"] * len(row)) if row["_riesgo"] else [""] * len(row)
+
+            cols_v = ["Destino", "Item", "Referencia", "Categoría", "Inv. hoy",
+                      "Venta diaria", "Días cobertura", "Edad máx. proyectada",
+                      "Unds en riesgo", "Estado", "_riesgo"]
+            styler = (
+                vista[cols_v].style
+                .apply(estilo_riesgo, axis=1)
+                .format({"Inv. hoy": "{:,.0f}", "Venta diaria": "{:,.0f}",
+                         "Días cobertura": "{:.1f}", "Edad máx. proyectada": "{:.1f}",
+                         "Unds en riesgo": "{:,.0f}", "Item": "{:.0f}"}, na_rep="—")
+                .hide(axis="columns", subset=["_riesgo"])
+            )
+            st.dataframe(styler, use_container_width=True, hide_index=True, height=520)
+            st.markdown(
+                "**Días cobertura** = inv. hoy ÷ venta diaria. **Edad máx. proyectada** = "
+                "edad que tendría el último lote al venderse bajo PEPS. Fila roja = algún "
+                "lote supera los 5 días de vida útil con el ritmo de venta actual."
+            )
+            st.caption(f"{len(vista):,} SKU/destino mostrados.")
+
     st.caption(
         f"Fuentes: {ARCHIVO_AYER} (inicial ayer) · {ARCHIVO_VENTAS} (ventas del período) · "
         f"{ARCHIVO_HOY} (inicial hoy) — hoja {HOJA_INV_ANALISIS}"
     )
+
+
+# ===========================================================================
+# MÓDULO 3 — SEGUIMIENTO DE RUPTURAS (gestión del proceso)
+# ===========================================================================
+def render_modulo_seguimiento():
+    st.markdown('<p class="titulo-modulo">📈 Seguimiento de Rupturas</p>', unsafe_allow_html=True)
+    st.caption(
+        "Mide el nivel de gestión: cuántas rupturas de rotación se detectaron día a día "
+        "y cuántas fueron explicadas por los líderes de zona."
+    )
+    st.divider()
+
+    if not bd_disponible():
+        st.warning(
+            "La base de datos de seguimiento aún no está configurada. Sigue la guía de "
+            "conexión a Google Sheets para activar este módulo. Una vez conectado, aquí verás "
+            "la línea de tiempo de rupturas y tu indicador de gestión."
+        )
+        if st.session_state.get("_bd_error"):
+            st.caption(f"Detalle técnico: {st.session_state['_bd_error']}")
+        return
+
+    rup = leer_tabla(HOJA_RUPTURAS, COLS_RUPTURAS)
+    ges = leer_tabla(HOJA_GESTIONES, COLS_GESTIONES)
+
+    if rup.empty:
+        st.info("Todavía no hay rupturas registradas en la base de datos.")
+        return
+
+    # Tipos y marca de gestión
+    rup["unds_varadas"] = pd.to_numeric(rup["unds_varadas"], errors="coerce").fillna(0)
+    llaves_gest = set(ges["llave"].astype(str)) if not ges.empty else set()
+    rup["gestionada"] = rup["llave"].astype(str).isin(llaves_gest)
+
+    total = len(rup)
+    gestionadas = int(rup["gestionada"].sum())
+    pendientes = total - gestionadas
+    pct = (gestionadas / total * 100) if total else 0
+
+    # --- KPIs de gestión ---
+    k1, k2, k3 = st.columns(3)
+    with k1:
+        st.markdown(tarjeta_kpi("Nivel de gestión", f"{pct:,.0f}%",
+                                estado="critical" if pct < 50 else "neutral", reina=True),
+                    unsafe_allow_html=True)
+    with k2:
+        st.markdown(tarjeta_kpi("Rupturas gestionadas", f"{gestionadas:,}", estado="neutral"),
+                    unsafe_allow_html=True)
+    with k3:
+        st.markdown(tarjeta_kpi("Rupturas pendientes", f"{pendientes:,}",
+                                estado="warning" if pendientes else "neutral"),
+                    unsafe_allow_html=True)
+    st.divider()
+
+    # --- Línea de tiempo: rupturas por fecha de corte, gestionadas vs pendientes ---
+    st.subheader("Línea de tiempo de rupturas")
+    serie = (rup.groupby(["fecha_corte", "gestionada"]).size()
+             .reset_index(name="n"))
+    pivot = serie.pivot(index="fecha_corte", columns="gestionada", values="n").fillna(0)
+    pivot = pivot.rename(columns={True: "Gestionadas", False: "Pendientes"})
+    for col in ("Gestionadas", "Pendientes"):
+        if col not in pivot.columns:
+            pivot[col] = 0
+    pivot = pivot.sort_index()
+
+    fig = go.Figure()
+    fig.add_trace(go.Bar(x=pivot.index, y=pivot["Gestionadas"], name="Gestionadas",
+                         marker_color=COLOR_PRIMARIO))
+    fig.add_trace(go.Bar(x=pivot.index, y=pivot["Pendientes"], name="Pendientes",
+                         marker_color="#D0021B"))
+    # Línea de total por día
+    total_dia = pivot["Gestionadas"] + pivot["Pendientes"]
+    fig.add_trace(go.Scatter(x=pivot.index, y=total_dia, name="Total rupturas",
+                             mode="lines+markers", line=dict(color=COLOR_ACENTO, width=3)))
+    fig.update_layout(
+        barmode="stack", height=380,
+        margin=dict(l=10, r=10, t=10, b=10),
+        plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+        font=dict(family="Nunito, sans-serif", size=13),
+        xaxis=dict(title="Fecha de corte"),
+        yaxis=dict(title="N° de rupturas", showgrid=True, gridcolor="#EEEEEE"),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+    st.divider()
+
+    # --- Detalle de gestiones registradas ---
+    st.subheader("Explicaciones registradas")
+    if ges.empty:
+        st.info("Aún no se han registrado explicaciones de los líderes.")
+    else:
+        vista = ges.rename(columns={
+            "fecha_corte": "Fecha corte", "destino": "Destino", "item": "Item",
+            "lider_zona": "Líder de zona", "categoria": "Categoría", "razon": "Razón",
+            "accion_correctiva": "Acción correctiva", "fecha_gestion": "Registrado",
+        })[["Fecha corte", "Destino", "Item", "Líder de zona", "Categoría",
+            "Razón", "Acción correctiva", "Registrado"]]
+        st.dataframe(vista, use_container_width=True, hide_index=True, height=360)
+
+        # Causas más frecuentes
+        st.subheader("Causas más frecuentes")
+        causas = ges["categoria"].value_counts().reset_index()
+        causas.columns = ["Categoría", "N° de casos"]
+        figc = go.Figure(go.Bar(
+            x=causas["N° de casos"], y=causas["Categoría"], orientation="h",
+            marker_color=COLOR_PRIMARIO,
+            text=causas["N° de casos"], textposition="outside",
+        ))
+        figc.update_layout(
+            height=260, margin=dict(l=10, r=10, t=10, b=10),
+            plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+            font=dict(family="Nunito, sans-serif", size=13),
+            xaxis=dict(title="Casos", showgrid=True, gridcolor="#EEEEEE"),
+            yaxis=dict(autorange="reversed"),
+        )
+        st.plotly_chart(figc, use_container_width=True)
 
 
 # ===========================================================================
@@ -987,7 +1524,7 @@ with st.sidebar:
     st.markdown("**Panel de Inventarios**")
     modulo = st.radio(
         "Módulo",
-        ["Inventario de Edades", "Análisis de Rotación PEPS"],
+        ["Inventario de Edades", "Análisis de Rotación PEPS", "Seguimiento de Rupturas"],
         label_visibility="collapsed",
     )
     st.divider()
@@ -1004,5 +1541,7 @@ with st.sidebar:
 
 if modulo == "Inventario de Edades":
     render_modulo_edades()
-else:
+elif modulo == "Análisis de Rotación PEPS":
     render_modulo_rotacion()
+else:
+    render_modulo_seguimiento()
