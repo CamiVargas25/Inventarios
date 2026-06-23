@@ -613,6 +613,17 @@ def es_pet(descripcion):
     return "PET" if "PET" in str(descripcion).upper() else "SUELTO"
 
 
+# Patrón de producto de TIENDA: "HUEVO (TALLA) X (N) CARTON VERDE CANASTA".
+# Todo lo demás se asume pedido para preventa. Tolera espaciado variable (X 30 / X20)
+# y sufijos después de CANASTA (p.ej. "- BUCAROS").
+_PATRON_TIENDA = re.compile(r"HUEVO\s+\w+\s*X\s*\d+\s+CARTON VERDE CANASTA")
+
+
+def es_tienda(referencia):
+    """True si la referencia tiene la estructura de producto de tienda."""
+    return bool(_PATRON_TIENDA.search(str(referencia).upper()))
+
+
 @st.cache_data(ttl=3600)
 def leer_ventas(ruta: str, cache_key: float = 0.0) -> pd.DataFrame:
     """Lee ventas, filtra línea HU, mapea bodega->destino, categoriza PET/SUELTO
@@ -1342,14 +1353,35 @@ def render_modulo_rotacion():
                 "Unds en riesgo": round(unds_riesgo, 0),
                 "Estado": estado,
                 "_riesgo": en_riesgo,
+                "_tienda": es_tienda(ref),
             })
 
         df_riesgo = pd.DataFrame(filas_riesgo)
         if df_riesgo.empty:
             st.info("No hay inventario para proyectar.")
         else:
-            n_riesgo = int(df_riesgo["_riesgo"].sum())
-            unds_tot_riesgo = df_riesgo.loc[df_riesgo["_riesgo"], "Unds en riesgo"].sum()
+            # Filtros (primero, para que los KPIs respeten el de tienda)
+            cfa, cfb, cfc = st.columns([2, 1, 1])
+            with cfa:
+                f_dest_r = st.multiselect("Destino", sorted(df_riesgo["Destino"].unique()),
+                                          placeholder="Todos", key="riesgo_dest")
+            with cfb:
+                solo_riesgo = st.toggle("Solo en riesgo", value=True, key="riesgo_toggle")
+            with cfc:
+                solo_tienda = st.toggle("Solo productos de tienda", value=False,
+                                        key="riesgo_tienda",
+                                        help="Producto de tienda: HUEVO (talla) X (n) CARTON VERDE CANASTA. "
+                                             "El resto suele ser preventa.")
+
+            # Base para KPIs: respeta destino y tienda, pero no 'solo en riesgo'
+            base = df_riesgo.copy()
+            if f_dest_r:
+                base = base[base["Destino"].isin(f_dest_r)]
+            if solo_tienda:
+                base = base[base["_tienda"]]
+
+            n_riesgo = int(base["_riesgo"].sum())
+            unds_tot_riesgo = base.loc[base["_riesgo"], "Unds en riesgo"].sum()
             kr1, kr2 = st.columns(2)
             with kr1:
                 st.markdown(tarjeta_kpi("SKU/destino en riesgo", f"{n_riesgo:,}",
@@ -1360,16 +1392,9 @@ def render_modulo_rotacion():
                                         estado="critical"), unsafe_allow_html=True)
 
             st.divider()
-            cfa, cfb = st.columns([2, 1])
-            with cfa:
-                f_dest_r = st.multiselect("Destino", sorted(df_riesgo["Destino"].unique()),
-                                          placeholder="Todos", key="riesgo_dest")
-            with cfb:
-                solo_riesgo = st.toggle("Solo en riesgo", value=True, key="riesgo_toggle")
 
-            vista = df_riesgo.copy()
-            if f_dest_r:
-                vista = vista[vista["Destino"].isin(f_dest_r)]
+            # Tabla: base + el filtro de 'solo en riesgo'
+            vista = base.copy()
             if solo_riesgo:
                 vista = vista[vista["_riesgo"]]
             vista = vista.sort_values(["_riesgo", "Edad máx. proyectada"],
