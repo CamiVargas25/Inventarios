@@ -636,17 +636,23 @@ def leer_ventas(ruta: str, cache_key: float = 0.0) -> pd.DataFrame:
 
 def preparar_ventas_peps(ventas, fecha_corte_hoy, dias):
     """Construye la venta que alimentará el teórico PEPS por (destino, item):
-       - SUELTO: promedio diario (total ÷ días calendario del rango) × días de ventana.
+       - SUELTO: promedio diario (total ÷ días operativos del rango) × días de ventana.
+                 'Días operativos' = días distintos del rango que NO son domingo, ya que
+                 el domingo es día estructural sin despacho y contarlo deprimiría el
+                 promedio (falsos positivos los lunes). La venta de un domingo, si la
+                 hubiera, sí se suma al total; solo se excluye del divisor.
        - PET: venta exacta del día analizado (= fecha de corte 'hoy').
     Devuelve (dict {(destino,item): venta_peps}, dict {(destino,item): categoria},
-              dict {(destino,item): venta_diaria}, n_dias_rango).
+              dict {(destino,item): venta_diaria}, n_dias_operativos).
     'venta_diaria' es el ritmo por día (promedio para SUELTO; venta del día para PET),
     usado en la alerta de vida útil."""
     ven_ok = ventas.dropna(subset=["destino"]).copy()
-    # Número de días calendario distintos en el archivo de ventas
-    dias_rango = ven_ok["fecha_venta"].dropna().nunique()
-    if dias_rango == 0:
-        dias_rango = 1
+    # Días operativos del rango = días distintos que NO son domingo (weekday()==6).
+    fechas_unicas = pd.Series(ven_ok["fecha_venta"].dropna().unique())
+    dias_operativos = int(sum(1 for f in fechas_unicas if f.weekday() != 6))
+    if dias_operativos == 0:
+        dias_operativos = 1
+    dias_rango = dias_operativos   # nombre conservado para el resto del código
 
     # Categoría dominante por (destino, item) — un SKU es PET o SUELTO de forma estable
     cat_map = (ven_ok.groupby(["destino", "item"])["categoria"]
@@ -658,7 +664,7 @@ def preparar_ventas_peps(ventas, fecha_corte_hoy, dias):
         sub = ven_ok[(ven_ok["destino"] == dest) & (ven_ok["item"] == item)]
         total = sub["cantidad"].sum()
         if cat == "SUELTO":
-            prom = total / dias_rango                 # promedio diario
+            prom = total / dias_operativos            # promedio diario (sin domingos)
             venta_diaria[(dest, item)] = prom
             venta_peps[(dest, item)] = prom * dias    # ventana del análisis
         else:  # PET: venta exacta del día = fecha de corte 'hoy'
@@ -958,9 +964,9 @@ def render_modulo_rotacion():
 
     if dias_rango > 1:
         st.info(
-            f"📅 El archivo de ventas cubre **{dias_rango} días**. Para productos "
-            "**SUELTO** se usa el promedio de venta diaria; para **PET**, la venta "
-            f"exacta del día de corte ({fecha_corte_hoy})."
+            f"📅 El promedio diario de **SUELTO** se calcula sobre **{dias_rango} días "
+            "operativos** del rango (se excluyen domingos por ser días sin despacho). "
+            f"Para **PET** se usa la venta exacta del día de corte ({fecha_corte_hoy})."
         )
 
     # --- Registro automático e idempotente a la BD ---
