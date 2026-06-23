@@ -1359,15 +1359,6 @@ def render_modulo_rotacion():
             en_riesgo = proy["riesgo_proyectado"]
             ya_vencido = proy["ya_vencido"]
             edad_max_proy = proy["edad_max_proyectada"]
-            # Estado priorizando el riesgo proyectado (accionable a futuro)
-            if vdiaria <= 0:
-                estado = "Sin venta (no proyectable)"
-            elif en_riesgo:
-                estado = "⚠️ Va a vencer"
-            elif ya_vencido:
-                estado = "🔴 Ya vencido hoy"
-            else:
-                estado = "✅ Rota a tiempo"
             ref = inv_hoy[(inv_hoy["destino"] == dest) & (inv_hoy["item"] == item)]["referencia"].iloc[0] \
                 if not inv_hoy[(inv_hoy["destino"] == dest) & (inv_hoy["item"] == item)].empty else ""
             filas_riesgo.append({
@@ -1380,8 +1371,6 @@ def render_modulo_rotacion():
                 "Días cobertura": round(tot / vdiaria, 1) if vdiaria > 0 else None,
                 "Edad máx. proyectada": edad_max_proy if vdiaria > 0 else None,
                 "Unds en riesgo": proy["unds_riesgo"],
-                "Unds ya vencidas": proy["unds_vencidas"],
-                "Estado": estado,
                 "_riesgo": en_riesgo,
                 "_vencido": ya_vencido,
                 "_tienda": es_tienda(ref),
@@ -1414,9 +1403,7 @@ def render_modulo_rotacion():
 
             n_riesgo = int(base["_riesgo"].sum())
             unds_tot_riesgo = base.loc[base["_riesgo"], "Unds en riesgo"].sum()
-            n_vencido = int(base["_vencido"].sum())
-            unds_tot_vencido = base.loc[base["_vencido"], "Unds ya vencidas"].sum()
-            kr1, kr2, kr3 = st.columns(3)
+            kr1, kr2 = st.columns(2)
             with kr1:
                 st.markdown(tarjeta_kpi("SKU/destino en riesgo (va a vencer)", f"{n_riesgo:,}",
                                         estado="warning" if n_riesgo else "neutral", reina=True),
@@ -1424,15 +1411,10 @@ def render_modulo_rotacion():
             with kr2:
                 st.markdown(tarjeta_kpi("Unidades en riesgo", f"{unds_tot_riesgo:,.0f}",
                                         estado="warning"), unsafe_allow_html=True)
-            with kr3:
-                st.markdown(tarjeta_kpi("Unidades ya vencidas hoy", f"{unds_tot_vencido:,.0f}",
-                                        estado="critical"), unsafe_allow_html=True)
             st.caption(
                 "**Va a vencer** = el lote nace sano (≤5 días) pero el ritmo de venta lo "
                 "lleva a superar 5 días antes de agotarse → accionable bajando inventario o "
-                "acelerando rotación. **Ya vencido hoy** = el lote ya superó los 5 días en el "
-                "inventario actual → producto a vender o retirar de inmediato; no depende del "
-                "ritmo de venta."
+                "acelerando rotación. El producto ya vencido se revisa en el módulo de Edades."
             )
 
             st.divider()
@@ -1445,28 +1427,28 @@ def render_modulo_rotacion():
                                       ascending=[False, False, False])
 
             def estilo_riesgo(row):
+                # Solo se resalta en ámbar lo que VA a vencer (accionable). El producto
+                # ya vencido no se pinta aquí porque ya es visible en el módulo de Edades.
                 if row["_riesgo"]:
-                    return ["background-color:#FFE08A;"] * len(row)   # ámbar: va a vencer
-                if row["_vencido"]:
-                    return ["background-color:#FF8A80;"] * len(row)   # rojo: ya vencido
+                    return ["background-color:#FFE08A;"] * len(row)
                 return [""] * len(row)
 
             cols_v = ["Destino", "Item", "Referencia", "Categoría", "Inv. hoy",
                       "Venta diaria", "Días cobertura", "Edad máx. proyectada",
-                      "Unds en riesgo", "Unds ya vencidas", "Estado", "_riesgo", "_vencido"]
+                      "Unds en riesgo", "_riesgo", "_vencido"]
             styler = (
                 vista[cols_v].style
                 .apply(estilo_riesgo, axis=1)
                 .format({"Inv. hoy": "{:,.0f}", "Venta diaria": "{:,.0f}",
                          "Días cobertura": "{:.1f}", "Edad máx. proyectada": "{:.1f}",
-                         "Unds en riesgo": "{:,.0f}", "Unds ya vencidas": "{:,.0f}",
+                         "Unds en riesgo": "{:,.0f}",
                          "Item": "{:.0f}"}, na_rep="—")
                 .hide(axis="columns", subset=["_riesgo", "_vencido"])
             )
             st.dataframe(styler, use_container_width=True, hide_index=True, height=520)
             st.markdown(
-                "🟡 **Va a vencer** (ámbar): rota lento y superará 5 días. "
-                "🔴 **Ya vencido hoy** (rojo): el lote ya pasó los 5 días, retirar/vender ya. "
+                "🟡 **Va a vencer** (ámbar): rota lento y superará 5 días antes de agotarse. "
+                "El producto **ya vencido hoy** se puede revisar en el módulo de Edades. "
                 "**Edad máx. proyectada** = edad del último lote al venderse bajo PEPS."
             )
             st.caption(f"{len(vista):,} SKU/destino mostrados.")
