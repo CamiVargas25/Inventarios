@@ -686,38 +686,63 @@ def preparar_ventas_peps(ventas, fecha_corte_hoy, dias):
 
 
 def proyectar_vida_util(inv_vec, venta_diaria, umbral=5):
-    """Proyección PEPS lote por lote: con la venta diaria, ¿algún lote cruzará el
-    umbral de vida útil antes de venderse? Lo viejo sale primero, así que cada lote
-    espera a que se vendan los más viejos.
+    """Proyección PEPS lote por lote, separando dos fenómenos distintos:
+       - YA VENCIDO HOY: el lote ya tiene edad > umbral en el inventario actual,
+         sin importar la venta. Es producto a retirar/vender ya, no un problema futuro.
+       - RIESGO PROYECTADO: el lote nace con edad <= umbral hoy, pero la venta lo
+         lleva a superar el umbral antes de agotarse (este es el propósito de la alerta).
+    Lo viejo sale primero; cada lote espera a que se vendan los más viejos.
     inv_vec: dict edad->cantidad (inventario actual del SKU/destino).
-    Devuelve (en_riesgo: bool, edad_max_proyectada: float, detalle: list).
+    Devuelve dict con: riesgo_proyectado(bool), ya_vencido(bool),
+      edad_max_proyectada(float), unds_riesgo, unds_vencidas, detalle(list).
     """
-    if venta_diaria <= 0 or not inv_vec:
-        return False, 0.0, []
+    base = {"riesgo_proyectado": False, "ya_vencido": False,
+            "edad_max_proyectada": 0.0, "unds_riesgo": 0.0,
+            "unds_vencidas": 0.0, "detalle": []}
+    if not inv_vec:
+        return base
     acumulado = 0.0
     detalle = []
-    en_riesgo = False
     edad_max_proy = 0.0
+    unds_riesgo = 0.0
+    unds_vencidas = 0.0
     # PEPS: procesar de más viejo a más nuevo
     for edad in sorted(inv_vec.keys(), reverse=True):
         cant = inv_vec[edad]
         if cant <= 0:
             continue
-        acumulado += cant
-        # Días hasta agotar este lote (incluye esperar los más viejos ya sumados)
-        dias_hasta_agotar = acumulado / venta_diaria
-        edad_proyectada = edad + dias_hasta_agotar
+        ya_vencido_lote = edad > umbral          # ya superó la vida útil hoy
+        if venta_diaria > 0:
+            acumulado += cant
+            dias_hasta_agotar = acumulado / venta_diaria
+            edad_proyectada = edad + dias_hasta_agotar
+        else:
+            dias_hasta_agotar = None
+            edad_proyectada = float(edad)        # sin venta no se proyecta avance
         edad_max_proy = max(edad_max_proy, edad_proyectada)
-        riesgo_lote = edad_proyectada > umbral
-        if riesgo_lote:
-            en_riesgo = True
+
+        # Riesgo proyectado SOLO si el lote nace sano (<=umbral) pero la venta lo cruza.
+        riesgo_lote = (not ya_vencido_lote) and (venta_diaria > 0) and (edad_proyectada > umbral)
+        if ya_vencido_lote:
+            unds_vencidas += cant
+        elif riesgo_lote:
+            unds_riesgo += cant
+
         detalle.append({
             "edad_actual": edad, "cantidad": cant,
-            "dias_para_vender": round(dias_hasta_agotar, 1),
+            "dias_para_vender": round(dias_hasta_agotar, 1) if dias_hasta_agotar is not None else None,
             "edad_proyectada": round(edad_proyectada, 1),
+            "ya_vencido": ya_vencido_lote,
             "riesgo": riesgo_lote,
         })
-    return en_riesgo, round(edad_max_proy, 1), detalle
+    return {
+        "riesgo_proyectado": unds_riesgo > 0,
+        "ya_vencido": unds_vencidas > 0,
+        "edad_max_proyectada": round(edad_max_proy, 1),
+        "unds_riesgo": round(unds_riesgo, 0),
+        "unds_vencidas": round(unds_vencidas, 0),
+        "detalle": detalle,
+    }
 
 
 def vec_por_edad(df, dest, item):
@@ -1330,15 +1355,19 @@ def render_modulo_rotacion():
             tot = sum(inv_vec.values())
             if tot <= 0:
                 continue
-            en_riesgo, edad_max_proy, detalle = proyectar_vida_util(
-                inv_vec, vdiaria, umbral=UMBRAL_VIDA)
+            proy = proyectar_vida_util(inv_vec, vdiaria, umbral=UMBRAL_VIDA)
+            en_riesgo = proy["riesgo_proyectado"]
+            ya_vencido = proy["ya_vencido"]
+            edad_max_proy = proy["edad_max_proyectada"]
+            # Estado priorizando el riesgo proyectado (accionable a futuro)
             if vdiaria <= 0:
                 estado = "Sin venta (no proyectable)"
             elif en_riesgo:
-                estado = "⚠️ En riesgo"
+                estado = "⚠️ Va a vencer"
+            elif ya_vencido:
+                estado = "🔴 Ya vencido hoy"
             else:
                 estado = "✅ Rota a tiempo"
-            unds_riesgo = sum(d["cantidad"] for d in detalle if d["riesgo"])
             ref = inv_hoy[(inv_hoy["destino"] == dest) & (inv_hoy["item"] == item)]["referencia"].iloc[0] \
                 if not inv_hoy[(inv_hoy["destino"] == dest) & (inv_hoy["item"] == item)].empty else ""
             filas_riesgo.append({
@@ -1350,9 +1379,11 @@ def render_modulo_rotacion():
                 "Venta diaria": round(vdiaria, 0),
                 "Días cobertura": round(tot / vdiaria, 1) if vdiaria > 0 else None,
                 "Edad máx. proyectada": edad_max_proy if vdiaria > 0 else None,
-                "Unds en riesgo": round(unds_riesgo, 0),
+                "Unds en riesgo": proy["unds_riesgo"],
+                "Unds ya vencidas": proy["unds_vencidas"],
                 "Estado": estado,
                 "_riesgo": en_riesgo,
+                "_vencido": ya_vencido,
                 "_tienda": es_tienda(ref),
             })
 
@@ -1366,7 +1397,8 @@ def render_modulo_rotacion():
                 f_dest_r = st.multiselect("Destino", sorted(df_riesgo["Destino"].unique()),
                                           placeholder="Todos", key="riesgo_dest")
             with cfb:
-                solo_riesgo = st.toggle("Solo en riesgo", value=True, key="riesgo_toggle")
+                solo_riesgo = st.toggle("Solo con alerta", value=True, key="riesgo_toggle",
+                                        help="Muestra solo los que van a vencer o ya están vencidos hoy.")
             with cfc:
                 solo_tienda = st.toggle("Solo productos de tienda", value=False,
                                         key="riesgo_tienda",
@@ -1382,43 +1414,60 @@ def render_modulo_rotacion():
 
             n_riesgo = int(base["_riesgo"].sum())
             unds_tot_riesgo = base.loc[base["_riesgo"], "Unds en riesgo"].sum()
-            kr1, kr2 = st.columns(2)
+            n_vencido = int(base["_vencido"].sum())
+            unds_tot_vencido = base.loc[base["_vencido"], "Unds ya vencidas"].sum()
+            kr1, kr2, kr3 = st.columns(3)
             with kr1:
-                st.markdown(tarjeta_kpi("SKU/destino en riesgo", f"{n_riesgo:,}",
-                                        estado="critical" if n_riesgo else "neutral", reina=True),
+                st.markdown(tarjeta_kpi("SKU/destino en riesgo (va a vencer)", f"{n_riesgo:,}",
+                                        estado="warning" if n_riesgo else "neutral", reina=True),
                             unsafe_allow_html=True)
             with kr2:
                 st.markdown(tarjeta_kpi("Unidades en riesgo", f"{unds_tot_riesgo:,.0f}",
+                                        estado="warning"), unsafe_allow_html=True)
+            with kr3:
+                st.markdown(tarjeta_kpi("Unidades ya vencidas hoy", f"{unds_tot_vencido:,.0f}",
                                         estado="critical"), unsafe_allow_html=True)
+            st.caption(
+                "**Va a vencer** = el lote nace sano (≤5 días) pero el ritmo de venta lo "
+                "lleva a superar 5 días antes de agotarse → accionable bajando inventario o "
+                "acelerando rotación. **Ya vencido hoy** = el lote ya superó los 5 días en el "
+                "inventario actual → producto a vender o retirar de inmediato; no depende del "
+                "ritmo de venta."
+            )
 
             st.divider()
 
             # Tabla: base + el filtro de 'solo en riesgo'
             vista = base.copy()
             if solo_riesgo:
-                vista = vista[vista["_riesgo"]]
-            vista = vista.sort_values(["_riesgo", "Edad máx. proyectada"],
-                                      ascending=[False, False])
+                vista = vista[vista["_riesgo"] | vista["_vencido"]]
+            vista = vista.sort_values(["_riesgo", "_vencido", "Edad máx. proyectada"],
+                                      ascending=[False, False, False])
 
             def estilo_riesgo(row):
-                return (["background-color:#FDEDEC;"] * len(row)) if row["_riesgo"] else [""] * len(row)
+                if row["_riesgo"]:
+                    return ["background-color:#FFE08A;"] * len(row)   # ámbar: va a vencer
+                if row["_vencido"]:
+                    return ["background-color:#FF8A80;"] * len(row)   # rojo: ya vencido
+                return [""] * len(row)
 
             cols_v = ["Destino", "Item", "Referencia", "Categoría", "Inv. hoy",
                       "Venta diaria", "Días cobertura", "Edad máx. proyectada",
-                      "Unds en riesgo", "Estado", "_riesgo"]
+                      "Unds en riesgo", "Unds ya vencidas", "Estado", "_riesgo", "_vencido"]
             styler = (
                 vista[cols_v].style
                 .apply(estilo_riesgo, axis=1)
                 .format({"Inv. hoy": "{:,.0f}", "Venta diaria": "{:,.0f}",
                          "Días cobertura": "{:.1f}", "Edad máx. proyectada": "{:.1f}",
-                         "Unds en riesgo": "{:,.0f}", "Item": "{:.0f}"}, na_rep="—")
-                .hide(axis="columns", subset=["_riesgo"])
+                         "Unds en riesgo": "{:,.0f}", "Unds ya vencidas": "{:,.0f}",
+                         "Item": "{:.0f}"}, na_rep="—")
+                .hide(axis="columns", subset=["_riesgo", "_vencido"])
             )
             st.dataframe(styler, use_container_width=True, hide_index=True, height=520)
             st.markdown(
-                "**Días cobertura** = inv. hoy ÷ venta diaria. **Edad máx. proyectada** = "
-                "edad que tendría el último lote al venderse bajo PEPS. Fila roja = algún "
-                "lote supera los 5 días de vida útil con el ritmo de venta actual."
+                "🟡 **Va a vencer** (ámbar): rota lento y superará 5 días. "
+                "🔴 **Ya vencido hoy** (rojo): el lote ya pasó los 5 días, retirar/vender ya. "
+                "**Edad máx. proyectada** = edad del último lote al venderse bajo PEPS."
             )
             st.caption(f"{len(vista):,} SKU/destino mostrados.")
 
