@@ -1381,13 +1381,10 @@ def render_modulo_rotacion():
             st.info("No hay inventario para proyectar.")
         else:
             # Filtros (primero, para que los KPIs respeten el de tienda)
-            cfa, cfb, cfc = st.columns([2, 1, 1])
+            cfa, cfc = st.columns([2, 1])
             with cfa:
                 f_dest_r = st.multiselect("Destino", sorted(df_riesgo["Destino"].unique()),
                                           placeholder="Todos", key="riesgo_dest")
-            with cfb:
-                solo_riesgo = st.toggle("Solo con alerta", value=True, key="riesgo_toggle",
-                                        help="Muestra solo los que van a vencer o ya están vencidos hoy.")
             with cfc:
                 solo_tienda = st.toggle("Solo productos de tienda", value=False,
                                         key="riesgo_tienda",
@@ -1419,39 +1416,26 @@ def render_modulo_rotacion():
 
             st.divider()
 
-            # Tabla: base + el filtro de 'solo en riesgo'
-            vista = base.copy()
-            if solo_riesgo:
-                vista = vista[vista["_riesgo"] | vista["_vencido"]]
-            vista = vista.sort_values(["_riesgo", "_vencido", "Edad máx. proyectada"],
-                                      ascending=[False, False, False])
+            # Tabla: solo producto EN RIESGO (va a vencer). Se omite el sano y el ya
+            # vencido (este último se revisa en el módulo de Edades).
+            vista = base[base["_riesgo"]].copy()
+            vista = vista.sort_values("Edad máx. proyectada", ascending=False)
 
-            def estilo_riesgo(row):
-                # Solo se resalta en ámbar lo que VA a vencer (accionable). El producto
-                # ya vencido no se pinta aquí porque ya es visible en el módulo de Edades.
-                if row["_riesgo"]:
-                    return ["background-color:#FFE08A;"] * len(row)
-                return [""] * len(row)
-
-            cols_v = ["Destino", "Item", "Referencia", "Categoría", "Inv. hoy",
-                      "Venta diaria", "Días cobertura", "Edad máx. proyectada",
-                      "Unds en riesgo", "_riesgo", "_vencido"]
-            styler = (
-                vista[cols_v].style
-                .apply(estilo_riesgo, axis=1)
-                .format({"Inv. hoy": "{:,.0f}", "Venta diaria": "{:,.0f}",
-                         "Días cobertura": "{:.1f}", "Edad máx. proyectada": "{:.1f}",
-                         "Unds en riesgo": "{:,.0f}",
-                         "Item": "{:.0f}"}, na_rep="—")
-                .hide(axis="columns", subset=["_riesgo", "_vencido"])
-            )
-            st.dataframe(styler, use_container_width=True, hide_index=True, height=520)
-            st.markdown(
-                "🟡 **Va a vencer** (ámbar): rota lento y superará 5 días antes de agotarse. "
-                "El producto **ya vencido hoy** se puede revisar en el módulo de Edades. "
-                "**Edad máx. proyectada** = edad del último lote al venderse bajo PEPS."
-            )
-            st.caption(f"{len(vista):,} SKU/destino mostrados.")
+            if vista.empty:
+                st.success("No hay producto en riesgo de vencer con los filtros actuales. 🎉")
+            else:
+                cols_v = ["Destino", "Item", "Referencia", "Categoría", "Inv. hoy",
+                          "Venta diaria", "Días cobertura", "Edad máx. proyectada",
+                          "Unds en riesgo"]
+                styler = (
+                    vista[cols_v].style
+                    .apply(lambda row: ["background-color:#FFE08A;"] * len(row), axis=1)
+                    .format({"Inv. hoy": "{:,.0f}", "Venta diaria": "{:,.0f}",
+                             "Días cobertura": "{:.1f}", "Edad máx. proyectada": "{:.1f}",
+                             "Unds en riesgo": "{:,.0f}",
+                             "Item": "{:.0f}"}, na_rep="—")
+                )
+                st.dataframe(styler, use_container_width=True, hide_index=True, height=520)
 
     st.caption(
         f"Fuentes: {ARCHIVO_AYER} (inicial ayer) · {ARCHIVO_VENTAS} (ventas del período) · "
