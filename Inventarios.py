@@ -1498,46 +1498,50 @@ def render_modulo_rotacion():
 def render_modulo_seguimiento():
     st.markdown('<p class="titulo-modulo">📈 Seguimiento de Rupturas</p>', unsafe_allow_html=True)
     st.caption(
-        "Mide el nivel de gestión: cuántas rupturas de rotación se detectaron día a día "
-        "y cuántas fueron explicadas por los líderes de zona."
+        "Evolución histórica de las rupturas de rotación y nivel de gestión por zona."
     )
     st.divider()
 
-    st.markdown(
-        "Sube aquí tu **Sheet histórico de rupturas** (exportado como CSV o Excel). "
-        "Debe incluir las columnas de la descarga del análisis más la columna "
-        "**Explicación** que diligencian los líderes. Una ruptura se cuenta como "
-        "*gestionada* cuando su Explicación no está vacía."
+    ARCHIVO_BD_RUP = resolver_archivo(
+        "BD Rupturas - Hoja 1.csv",
+        "BD_Rupturas_-_Hoja_1.csv",
+        "BD Rupturas Hoja 1.csv",
     )
-    if URL_SHEET_HISTORICO.strip():
-        st.link_button("📄 Abrir Sheet histórico", URL_SHEET_HISTORICO.strip())
 
-    archivo = st.file_uploader(
-        "Histórico de rupturas (CSV o Excel)",
-        type=["csv", "xlsx", "xls"],
-        help="Descarga tu Sheet histórico como CSV/Excel y súbelo aquí para ver el seguimiento.",
-    )
-    if archivo is None:
-        st.info("Sube el archivo histórico para ver la línea de tiempo y el nivel de gestión.")
+    if not os.path.exists(ARCHIVO_BD_RUP):
+        st.info(
+            f"Sube el archivo **BD Rupturas - Hoja 1.csv** a la raíz del repositorio "
+            "para activar el seguimiento histórico."
+        )
         return
 
     try:
-        if archivo.name.lower().endswith((".xlsx", ".xls")):
-            rup = pd.read_excel(archivo)
+        for _enc in ("utf-8-sig", "latin-1", "cp1252", "utf-8"):
+            try:
+                # sep=None + engine='python': pandas detecta automáticamente el separador
+                # (, ; \t etc.) sin importar cómo se exportó desde Excel o Google Sheets.
+                rup_raw = pd.read_csv(ARCHIVO_BD_RUP, encoding=_enc,
+                                      sep=None, engine="python")
+                break
+            except UnicodeDecodeError:
+                continue
         else:
-            rup = pd.read_csv(archivo)
+            st.error("No pude decodificar el archivo CSV. Guárdalo como UTF-8 desde Excel.")
+            return
     except Exception as e:
         st.error(f"No pude leer el archivo: {e}")
         return
 
-    # Normaliza nombres de columnas (tolerante a mayúsculas/acentos/espacios).
+    # Normaliza columnas (tolerante a mayúsculas/acentos/espacios).
     norm_map = {}
-    for c in rup.columns:
+    for c in rup_raw.columns:
         cn = norm(c)
         if cn == "FECHA CORTE":
             norm_map[c] = "fecha_corte"
         elif cn == "DESTINO":
             norm_map[c] = "destino"
+        elif cn in ("LIDER RESPONSABLE", "LIDER RESPONSABLE"):
+            norm_map[c] = "lider_responsable"
         elif cn == "ITEM":
             norm_map[c] = "item"
         elif cn == "REFERENCIA":
@@ -1548,110 +1552,189 @@ def render_modulo_seguimiento():
             norm_map[c] = "vendido"
         elif cn in ("INV HOY", "INV. HOY"):
             norm_map[c] = "inv_hoy"
-        elif cn in ("EXPLICACION", "EXPLICACIÓN"):
+        elif cn in ("EXPLICACION", "EXPLICACION"):
             norm_map[c] = "explicacion"
-    rup = rup.rename(columns=norm_map)
+    rup = rup_raw.rename(columns=norm_map)
 
-    faltan = [c for c in ("fecha_corte", "destino", "item") if c not in rup.columns]
-    if faltan:
-        st.error(
-            "Al archivo le faltan columnas obligatorias: "
-            + ", ".join(faltan)
-            + ". Verifica que subiste el Sheet histórico con los encabezados correctos."
-        )
-        return
+    # Derivar líder si la columna no viene en el CSV
+    if "lider_responsable" not in rup.columns and "destino" in rup.columns:
+        rup["lider_responsable"] = rup["destino"].apply(lider_por_destino)
     if "explicacion" not in rup.columns:
         rup["explicacion"] = ""
+
+    faltan = [c for c in ("fecha_corte", "destino") if c not in rup.columns]
+    if faltan:
+        st.error(
+            "Al archivo le faltan columnas obligatorias: **"
+            + "**, **".join(faltan)
+            + f"**. Encabezados leídos: `{list(rup_raw.columns)}`"
+        )
+        return
 
     if rup.empty:
         st.info("El archivo no tiene filas de rupturas todavía.")
         return
 
-    # Una ruptura está gestionada si su Explicación no está vacía.
     rup["explicacion"] = rup["explicacion"].fillna("").astype(str).str.strip()
     rup["gestionada"] = rup["explicacion"] != ""
 
-    total = len(rup)
-    gestionadas = int(rup["gestionada"].sum())
+    # --- Filtros ---
+    cf1, cf2 = st.columns(2)
+    lideres_disp = sorted(rup["lider_responsable"].replace("", "Sin asignar").dropna().unique().tolist())
+    destinos_disp = sorted(rup["destino"].dropna().unique().tolist())
+    with cf1:
+        f_lider = st.multiselect("Líder responsable", lideres_disp, placeholder="Todos")
+    with cf2:
+        f_dest = st.multiselect("Destino", destinos_disp, placeholder="Todos")
+
+    base = rup.copy()
+    base["lider_responsable"] = base["lider_responsable"].replace("", "Sin asignar")
+    if f_lider:
+        base = base[base["lider_responsable"].isin(f_lider)]
+    if f_dest:
+        base = base[base["destino"].isin(f_dest)]
+
+    if base.empty:
+        st.info("No hay registros con los filtros seleccionados.")
+        return
+
+    total = len(base)
+    gestionadas = int(base["gestionada"].sum())
     pendientes = total - gestionadas
     pct = (gestionadas / total * 100) if total else 0
 
-    # --- KPIs de gestión ---
-    k1, k2, k3 = st.columns(3)
-    with k1:
-        st.markdown(tarjeta_kpi("Nivel de gestión", f"{pct:,.0f}%",
-                                estado="critical" if pct < 50 else "neutral", reina=True),
-                    unsafe_allow_html=True)
-    with k2:
-        st.markdown(tarjeta_kpi("Rupturas gestionadas", f"{gestionadas:,}", estado="neutral"),
-                    unsafe_allow_html=True)
-    with k3:
-        st.markdown(tarjeta_kpi("Rupturas pendientes", f"{pendientes:,}",
-                                estado="warning" if pendientes else "neutral"),
-                    unsafe_allow_html=True)
     st.divider()
 
-    # --- Línea de tiempo: rupturas por fecha de corte, gestionadas vs pendientes ---
-    st.subheader("Línea de tiempo de rupturas")
-    serie = (rup.groupby(["fecha_corte", "gestionada"]).size()
-             .reset_index(name="n"))
-    pivot = serie.pivot(index="fecha_corte", columns="gestionada", values="n").fillna(0)
-    pivot = pivot.rename(columns={True: "Gestionadas", False: "Pendientes"})
-    for col in ("Gestionadas", "Pendientes"):
-        if col not in pivot.columns:
-            pivot[col] = 0
-    pivot = pivot.sort_index()
+    # --- KPI principal: donut de gestión + tarjetas ---
+    col_donut, col_kpis = st.columns([1, 2], gap="large")
 
-    fig = go.Figure()
-    fig.add_trace(go.Bar(x=pivot.index, y=pivot["Gestionadas"], name="Gestionadas",
-                         marker_color=COLOR_PRIMARIO))
-    fig.add_trace(go.Bar(x=pivot.index, y=pivot["Pendientes"], name="Pendientes",
-                         marker_color="#D0021B"))
-    # Línea de total por día
-    total_dia = pivot["Gestionadas"] + pivot["Pendientes"]
-    fig.add_trace(go.Scatter(x=pivot.index, y=total_dia, name="Total rupturas",
-                             mode="lines+markers", line=dict(color=COLOR_ACENTO, width=3)))
-    fig.update_layout(
-        barmode="stack", height=380,
-        margin=dict(l=10, r=10, t=10, b=10),
-        plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
-        font=dict(family="Nunito, sans-serif", size=13),
-        xaxis=dict(title="Fecha de corte"),
-        yaxis=dict(title="N° de rupturas", showgrid=True, gridcolor="#EEEEEE"),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-    )
-    st.plotly_chart(fig, use_container_width=True)
+    with col_donut:
+        fig_d = go.Figure(go.Pie(
+            values=[max(pct, 0.5), max(100 - pct, 0)],
+            hole=0.72,
+            marker_colors=[COLOR_PRIMARIO, "#D4EDD0"],
+            textinfo="none",
+            hoverinfo="skip",
+            direction="clockwise",
+            sort=False,
+            rotation=90,
+        ))
+        fig_d.update_layout(
+            showlegend=False,
+            annotations=[{
+                "text": f"<b>{pct:.0f}%</b>",
+                "x": 0.5, "y": 0.5,
+                "font": {"size": 36, "color": COLOR_TEXTO, "family": "Nunito, sans-serif"},
+                "showarrow": False,
+                "xanchor": "center",
+                "yanchor": "middle",
+            }],
+            title=dict(
+                text="Nivel de Gestión",
+                x=0.5, xanchor="center",
+                font=dict(size=13, color="#4A4A4A", family="Nunito, sans-serif"),
+            ),
+            margin=dict(l=20, r=20, t=45, b=10),
+            height=230,
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+        )
+        st.plotly_chart(fig_d, use_container_width=True)
+
+    with col_kpis:
+        st.markdown("<br><br>", unsafe_allow_html=True)
+        ck1, ck2, ck3 = st.columns(3)
+        with ck1:
+            st.markdown(
+                tarjeta_kpi("Total rupturas", f"{total:,}", estado="neutral"),
+                unsafe_allow_html=True,
+            )
+        with ck2:
+            st.markdown(
+                tarjeta_kpi("Gestionadas", f"{gestionadas:,}", estado="neutral"),
+                unsafe_allow_html=True,
+            )
+        with ck3:
+            st.markdown(
+                tarjeta_kpi("Pendientes", f"{pendientes:,}",
+                            estado="warning" if pendientes else "neutral"),
+                unsafe_allow_html=True,
+            )
 
     st.divider()
 
-    # --- Detalle de explicaciones registradas ---
-    st.subheader("Explicaciones registradas")
-    ges = rup[rup["gestionada"]].copy()
-    if ges.empty:
-        st.info("Aún no hay rupturas con explicación diligenciada en el histórico.")
+    # --- Evolución de rupturas (líneas) ---
+    st.subheader("Evolución de rupturas")
+    if "fecha_corte" in base.columns:
+        serie = base.groupby(["fecha_corte", "gestionada"]).size().reset_index(name="n")
+        pivot = serie.pivot(index="fecha_corte", columns="gestionada", values="n").fillna(0)
+        pivot = pivot.rename(columns={True: "Gestionadas", False: "Pendientes"})
+        for col in ("Gestionadas", "Pendientes"):
+            if col not in pivot.columns:
+                pivot[col] = 0
+        pivot = pivot.sort_index()
+        pivot["Total"] = pivot["Gestionadas"] + pivot["Pendientes"]
+
+        fig_l = go.Figure()
+        fig_l.add_trace(go.Scatter(
+            x=pivot.index, y=pivot["Total"],
+            name="Total", mode="lines+markers",
+            line=dict(color=COLOR_ACENTO, width=3),
+            marker=dict(size=7),
+        ))
+        fig_l.add_trace(go.Scatter(
+            x=pivot.index, y=pivot["Gestionadas"],
+            name="Gestionadas", mode="lines+markers",
+            line=dict(color=COLOR_PRIMARIO, width=2),
+            marker=dict(size=6),
+        ))
+        fig_l.add_trace(go.Scatter(
+            x=pivot.index, y=pivot["Pendientes"],
+            name="Pendientes", mode="lines+markers",
+            line=dict(color=COLOR_CRITICO, width=2),
+            marker=dict(size=6),
+        ))
+        fig_l.update_layout(
+            height=360,
+            margin=dict(l=10, r=10, t=10, b=10),
+            plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+            font=dict(family="Nunito, sans-serif", size=13),
+            xaxis=dict(title="Fecha de corte", showgrid=True, gridcolor="#EEEEEE"),
+            yaxis=dict(title="N° de rupturas", showgrid=True, gridcolor="#EEEEEE"),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        )
+        st.plotly_chart(fig_l, use_container_width=True)
     else:
-        cols_vista = [c for c in ["fecha_corte", "destino", "item", "referencia",
-                                  "inv_ayer", "vendido", "inv_hoy", "explicacion"]
-                      if c in ges.columns]
-        vista = ges[cols_vista].rename(columns={
-            "fecha_corte": "Fecha corte", "destino": "Destino", "item": "Item",
-            "referencia": "Referencia", "inv_ayer": "Inv Ayer", "vendido": "Vendido",
-            "inv_hoy": "Inv hoy", "explicacion": "Explicación",
-        })
-        st.dataframe(vista, use_container_width=True, hide_index=True, height=360)
+        st.info("El archivo no contiene columna de fecha de corte.")
 
-    # --- Rupturas pendientes de explicar ---
-    pend = rup[~rup["gestionada"]].copy()
-    if not pend.empty:
-        st.subheader("Rupturas pendientes de explicar")
-        cols_p = [c for c in ["fecha_corte", "destino", "item", "referencia",
-                              "inv_ayer", "vendido", "inv_hoy"] if c in pend.columns]
-        vista_p = pend[cols_p].rename(columns={
-            "fecha_corte": "Fecha corte", "destino": "Destino", "item": "Item",
-            "referencia": "Referencia", "inv_ayer": "Inv Ayer", "vendido": "Vendido",
-            "inv_hoy": "Inv hoy",
+    st.divider()
+
+    # --- Tablas de detalle ---
+    pend_df = base[~base["gestionada"]].copy()
+    gest_df = base[base["gestionada"]].copy()
+
+    if not pend_df.empty:
+        st.subheader(f"⏳ Rupturas pendientes de gestión ({len(pend_df):,})")
+        cols_p = [c for c in ["fecha_corte", "lider_responsable", "destino", "item",
+                               "referencia", "inv_ayer", "vendido", "inv_hoy"]
+                  if c in pend_df.columns]
+        vista_p = pend_df[cols_p].rename(columns={
+            "fecha_corte": "Fecha corte", "lider_responsable": "Líder",
+            "destino": "Destino", "item": "Item", "referencia": "Referencia",
+            "inv_ayer": "Inv Ayer", "vendido": "Vendido", "inv_hoy": "Inv hoy",
         })
         st.dataframe(vista_p, use_container_width=True, hide_index=True, height=280)
+
+    if not gest_df.empty:
+        st.subheader(f"✅ Rupturas gestionadas ({len(gest_df):,})")
+        cols_g = [c for c in ["fecha_corte", "lider_responsable", "destino", "item",
+                               "referencia", "explicacion"] if c in gest_df.columns]
+        vista_g = gest_df[cols_g].rename(columns={
+            "fecha_corte": "Fecha corte", "lider_responsable": "Líder",
+            "destino": "Destino", "item": "Item", "referencia": "Referencia",
+            "explicacion": "Explicación",
+        })
+        st.dataframe(vista_g, use_container_width=True, hide_index=True, height=280)
 
 
 # ===========================================================================
