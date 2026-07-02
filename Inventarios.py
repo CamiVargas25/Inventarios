@@ -1313,8 +1313,8 @@ def render_modulo_rotacion():
                     filas_lote.append({
                         "Lote (edad ayer → hoy)": f"{e}d → {e_hoy}d",
                         "Cantidad ayer": c_ayer,
-                        "Teórico hoy (PEPS)": c_teo,
                         "Real hoy": c_real,
+                        "Teórico hoy (PEPS)": c_teo,
                         "Estado del lote": estado,
                     })
                 df_lotes = pd.DataFrame(filas_lote)
