@@ -1495,6 +1495,53 @@ def render_modulo_rotacion():
 # ===========================================================================
 # MÓDULO 3 — SEGUIMIENTO DE RUPTURAS (gestión del proceso)
 # ===========================================================================
+def _numero_causa(causa: str) -> float:
+    """Extrae el número de prefijo de una causa estandarizada (p.ej. '2. Error...' -> 2)
+    para poder ordenarla numéricamente. Las causas sin número (como 'Sin explicación')
+    van al final."""
+    m = re.match(r"\s*(\d+)\.", str(causa))
+    return int(m.group(1)) if m else float("inf")
+
+
+def _colores_causas(causas: list) -> dict:
+    """Asigna un color estable a cada causa, respetando su orden numérico."""
+    paleta = [COLOR_PRIMARIO, COLOR_ACENTO, COLOR_ADV, COLOR_CRITICO, "#4A90D9"]
+    colores = {"Sin explicación": "#C9CDD1"}
+    resto = [c for c in causas if c not in colores]
+    for i, c in enumerate(resto):
+        colores[c] = paleta[i % len(paleta)]
+    return colores
+
+
+# Agrupación comercial de los CEDI/destino por regional (definida con Camila).
+REGIONALES = {
+    "CENTRO ORIENTE": ["BOGOTA MONTEVIDEO", "BOGOTA SIBERIA", "VILLAVICENCIO"],
+    "COSTA ORIENTE": ["BARRANQUILLA", "BUCARAMANGA", "CARTAGENA", "CUCUTA",
+                      "SANTA MARTA", "VALLEDUPAR"],
+    "OCCIDENTE": ["CALI", "MEDELLIN", "MONTERIA", "PASTO", "POPAYAN", "SINCELEJO"],
+}
+ORDEN_REGIONALES = ["CENTRO ORIENTE", "COSTA ORIENTE", "OCCIDENTE", "OTROS"]
+# Misma paleta que _colores_causas() (gráfico de rupturas por fecha y causa). Se
+# usa CRITICO en vez de ADV para Occidente porque ADV (ámbar) y ACENTO (naranja)
+# son tonos casi idénticos y, al oscurecerlos por regional, se veían iguales.
+COLOR_REGIONAL = {
+    "CENTRO ORIENTE": COLOR_PRIMARIO,
+    "COSTA ORIENTE": COLOR_ACENTO,
+    "OCCIDENTE": COLOR_CRITICO,
+    "OTROS": "#4A90D9",
+}
+
+
+def regional_por_destino(destino: str) -> str:
+    """Regional comercial a la que pertenece un CEDI/destino. Los CEDI que no calzan
+    con ninguna regional (p.ej. plantas como LANZA/BELLAVISTA/PALMAS) caen en 'OTROS'."""
+    d = norm(str(destino))
+    for regional, claves in REGIONALES.items():
+        if any(clave in d for clave in claves):
+            return regional
+    return "OTROS"
+
+
 def render_modulo_seguimiento():
     st.markdown('<p class="titulo-modulo">📈 Seguimiento de Rupturas</p>', unsafe_allow_html=True)
     st.caption(
@@ -1540,8 +1587,8 @@ def render_modulo_seguimiento():
             norm_map[c] = "fecha_corte"
         elif cn == "DESTINO":
             norm_map[c] = "destino"
-        elif cn in ("LIDER RESPONSABLE", "LIDER RESPONSABLE"):
-            norm_map[c] = "lider_responsable"
+        elif cn in ("RESPONSABLE INV", "LIDER RESPONSABLE"):
+            norm_map[c] = "responsable_inv"
         elif cn == "ITEM":
             norm_map[c] = "item"
         elif cn == "REFERENCIA":
@@ -1556,9 +1603,8 @@ def render_modulo_seguimiento():
             norm_map[c] = "explicacion"
     rup = rup_raw.rename(columns=norm_map)
 
-    # Derivar líder si la columna no viene en el CSV
-    if "lider_responsable" not in rup.columns and "destino" in rup.columns:
-        rup["lider_responsable"] = rup["destino"].apply(lider_por_destino)
+    if "responsable_inv" not in rup.columns:
+        rup["responsable_inv"] = ""
     if "explicacion" not in rup.columns:
         rup["explicacion"] = ""
 
@@ -1576,21 +1622,15 @@ def render_modulo_seguimiento():
         return
 
     rup["explicacion"] = rup["explicacion"].fillna("").astype(str).str.strip()
+    rup["responsable_inv"] = rup["responsable_inv"].fillna("").astype(str).str.strip()
     rup["gestionada"] = rup["explicacion"] != ""
 
     # --- Filtros ---
-    cf1, cf2 = st.columns(2)
-    lideres_disp = sorted(rup["lider_responsable"].replace("", "Sin asignar").dropna().unique().tolist())
     destinos_disp = sorted(rup["destino"].dropna().unique().tolist())
-    with cf1:
-        f_lider = st.multiselect("Líder responsable", lideres_disp, placeholder="Todos")
-    with cf2:
-        f_dest = st.multiselect("Destino", destinos_disp, placeholder="Todos")
+    f_dest = st.multiselect("Destino", destinos_disp, placeholder="Todos")
 
     base = rup.copy()
-    base["lider_responsable"] = base["lider_responsable"].replace("", "Sin asignar")
-    if f_lider:
-        base = base[base["lider_responsable"].isin(f_lider)]
+    base["responsable_inv"] = base["responsable_inv"].replace("", "Sin asignar")
     if f_dest:
         base = base[base["destino"].isin(f_dest)]
 
@@ -1709,17 +1749,138 @@ def render_modulo_seguimiento():
 
     st.divider()
 
+    # --- Rupturas por fecha, desglosado por causa ---
+    st.subheader("📅 Rupturas por fecha y causa")
+    st.caption(
+        "Número de rupturas por fecha de corte, desglosado por causa. Incluye "
+        "todas las rupturas del periodo filtrado; las que aún no tienen "
+        "explicación registrada se agrupan como 'Sin explicación'."
+    )
+    fecha_causa = base.copy()
+    fecha_causa["causa_mostrada"] = fecha_causa["explicacion"].replace("", "Sin explicación")
+    fecha_causa["fecha_dt"] = pd.to_datetime(fecha_causa["fecha_corte"], dayfirst=True, errors="coerce")
+    fecha_causa = fecha_causa.dropna(subset=["fecha_dt"])
+
+    if fecha_causa.empty:
+        st.info("No se pudieron interpretar las fechas de corte para graficar.")
+    else:
+        orden_fechas = sorted(fecha_causa["fecha_dt"].unique())
+        etiquetas_fecha = [pd.Timestamp(f).strftime("%d-%b") for f in orden_fechas]
+
+        causas_f = sorted(fecha_causa["causa_mostrada"].unique().tolist(), key=_numero_causa)
+        color_causa_f = _colores_causas(causas_f)
+        max_n = int(fecha_causa.groupby("fecha_dt").size().max())
+
+        fig_fecha = go.Figure()
+        for causa in causas_f:
+            conteo = (
+                fecha_causa[fecha_causa["causa_mostrada"] == causa]
+                .groupby("fecha_dt").size()
+                .reindex(orden_fechas, fill_value=0)
+            )
+            valores = conteo.values.astype(int)
+            fig_fecha.add_trace(go.Bar(
+                x=etiquetas_fecha, y=valores, name=causa,
+                marker_color=color_causa_f[causa],
+                text=[str(v) if v > 0 else "" for v in valores],
+                textposition="inside",
+                insidetextfont=dict(color="white", size=11),
+                constraintext="none",
+                hovertemplate=f"{causa}<br>%{{x}}: %{{y}} rupturas<extra></extra>",
+            ))
+        fig_fecha.update_layout(
+            barmode="stack",
+            height=380,
+            margin=dict(l=10, r=10, t=10, b=10),
+            plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+            font=dict(family="Nunito, sans-serif", size=13),
+            xaxis=dict(title="Fecha de corte", type="category"),
+            yaxis=dict(title="N° de rupturas", showgrid=True, gridcolor="#EEEEEE",
+                       tick0=0, dtick=1, range=[0, max_n + 1]),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0,
+                        traceorder="normal"),
+        )
+        st.plotly_chart(fig_fecha, use_container_width=True)
+
+    st.divider()
+
+    # --- Ranking de rupturas por causa (raíz), desglosado por regional ---
+    st.subheader("🔎 Rupturas por causa y regional")
+    st.caption(
+        "Ranking de causas por número de rupturas (la más frecuente arriba), "
+        "desglosado por regional (Centro Oriente, Costa Oriente, Occidente). "
+        "Cada barra suma todos los CEDIs de esa regional. Incluye todas las rupturas "
+        "del periodo filtrado; las que aún no tienen explicación registrada se "
+        "agrupan como 'Sin explicación'."
+    )
+    causas_base = base.copy()
+    causas_base["causa_mostrada"] = causas_base["explicacion"].replace("", "Sin explicación")
+    causas_base["regional"] = causas_base["destino"].apply(regional_por_destino)
+
+    # Orden por la escala de numeración de las causas (1, 2, 3... de arriba hacia abajo);
+    # se pasa en reversa porque en un bar horizontal el primer elemento de la lista
+    # queda abajo del todo.
+    orden_causas = sorted(
+        causas_base["causa_mostrada"].unique().tolist(), key=_numero_causa, reverse=True
+    )
+    max_n_causa = int(causas_base.groupby("causa_mostrada").size().max())
+
+    regionales_presentes = [r for r in ORDEN_REGIONALES
+                             if r in causas_base["regional"].unique()]
+
+    fig_causas = go.Figure()
+    for regional in regionales_presentes:
+        conteo = (
+            causas_base[causas_base["regional"] == regional]
+            .groupby("causa_mostrada").size()
+            .reindex(orden_causas, fill_value=0)
+        )
+        fig_causas.add_trace(go.Bar(
+            y=orden_causas, x=conteo.values, name=regional, orientation="h",
+            marker_color=COLOR_REGIONAL[regional],
+            text=[str(v) if v > 0 else "" for v in conteo.values],
+            textposition="inside",
+            insidetextfont=dict(color="white", size=11),
+            constraintext="none",
+            hovertemplate=f"{regional}<br>%{{y}}: %{{x}} rupturas<extra></extra>",
+        ))
+    fig_causas.update_layout(
+        barmode="stack",
+        height=max(320, 50 * len(orden_causas)),
+        margin=dict(l=10, r=10, t=10, b=10),
+        plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+        font=dict(family="Nunito, sans-serif", size=13),
+        xaxis=dict(title="N° de rupturas", showgrid=True, gridcolor="#EEEEEE",
+                   tick0=0, dtick=1, range=[0, max_n_causa + 1]),
+        yaxis=dict(title=""),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0,
+                    traceorder="normal"),
+    )
+    st.plotly_chart(fig_causas, use_container_width=True)
+
+    gest_causas = base[base["gestionada"]]
+    if gest_causas.empty:
+        st.info("Aún no hay rupturas gestionadas con causa registrada.")
+    else:
+        top_causa = gest_causas["explicacion"].value_counts().idxmax()
+        kc1, _ = st.columns(2)
+        with kc1:
+            st.markdown(tarjeta_kpi("Causa más frecuente", top_causa, estado="warning"),
+                        unsafe_allow_html=True)
+
+    st.divider()
+
     # --- Tablas de detalle ---
     pend_df = base[~base["gestionada"]].copy()
     gest_df = base[base["gestionada"]].copy()
 
     if not pend_df.empty:
         st.subheader(f"⏳ Rupturas pendientes de gestión ({len(pend_df):,})")
-        cols_p = [c for c in ["fecha_corte", "lider_responsable", "destino", "item",
+        cols_p = [c for c in ["fecha_corte", "destino", "item",
                                "referencia", "inv_ayer", "vendido", "inv_hoy"]
                   if c in pend_df.columns]
         vista_p = pend_df[cols_p].rename(columns={
-            "fecha_corte": "Fecha corte", "lider_responsable": "Líder",
+            "fecha_corte": "Fecha corte",
             "destino": "Destino", "item": "Item", "referencia": "Referencia",
             "inv_ayer": "Inv Ayer", "vendido": "Vendido", "inv_hoy": "Inv hoy",
         })
@@ -1727,12 +1888,12 @@ def render_modulo_seguimiento():
 
     if not gest_df.empty:
         st.subheader(f"✅ Rupturas gestionadas ({len(gest_df):,})")
-        cols_g = [c for c in ["fecha_corte", "lider_responsable", "destino", "item",
-                               "referencia", "explicacion"] if c in gest_df.columns]
+        cols_g = [c for c in ["fecha_corte", "destino", "item",
+                               "referencia", "responsable_inv", "explicacion"] if c in gest_df.columns]
         vista_g = gest_df[cols_g].rename(columns={
-            "fecha_corte": "Fecha corte", "lider_responsable": "Líder",
+            "fecha_corte": "Fecha corte",
             "destino": "Destino", "item": "Item", "referencia": "Referencia",
-            "explicacion": "Explicación",
+            "responsable_inv": "Responsable Inv", "explicacion": "Explicación",
         })
         st.dataframe(vista_g, use_container_width=True, hide_index=True, height=280)
 
