@@ -1542,12 +1542,67 @@ def regional_por_destino(destino: str) -> str:
     return "OTROS"
 
 
+HOJA_INV_DESECHO = "inv"  # pestaña de inventario detallado (para detectar DESECHO)
+
+
+@st.cache_data(ttl=3600)
+def leer_desecho_cedis(ruta: str, cache_key: float = 0.0) -> pd.DataFrame:
+    """Lee la pestaña 'inv' y filtra referencias de huevo DESECHO en CEDIs.
+
+    Un destino se considera CEDI si su nombre empieza por 'TAT' (p.ej. TAT
+    BARRANQUILLA, TAT BOGOTA MONTEVIDEO). Se excluyen las plantas (ALKA1,
+    ALKA2, BELLAVISTA, PALMAS, LANZA) y demás destinos que no son CEDI.
+    """
+    df = pd.read_excel(ruta, sheet_name=HOJA_INV_DESECHO)
+    df.columns = [str(c).strip() for c in df.columns]
+    out = pd.DataFrame({
+        "destino": df.get("DESTINO"),
+        "referencia": df.get("descripcion_articulo"),
+        "cantidad": pd.to_numeric(df.get("cantidad"), errors="coerce").fillna(0.0),
+    })
+    out = out.dropna(subset=["destino"])
+    es_cedi = out["destino"].astype(str).str.strip().str.upper().str.startswith("TAT")
+    es_desecho = out["referencia"].astype(str).str.upper().str.contains("DESECHO")
+    out = out[es_cedi & es_desecho & (out["cantidad"] > 0)]
+    return (
+        out.groupby(["destino", "referencia"], as_index=False)["cantidad"]
+        .sum()
+        .sort_values("cantidad", ascending=False)
+    )
+
+
 def render_modulo_seguimiento():
     st.markdown('<p class="titulo-modulo">📈 Seguimiento de Rupturas</p>', unsafe_allow_html=True)
     st.caption(
         "Evolución histórica de las rupturas de rotación y nivel de gestión por zona."
     )
     st.divider()
+
+    # ----- Alerta de inventario DESECHO en CEDIs -----
+    try:
+        desecho = leer_desecho_cedis(ARCHIVO_HOY, mtime(ARCHIVO_HOY))
+    except (FileNotFoundError, ValueError):
+        desecho = pd.DataFrame()
+
+    if not desecho.empty:
+        total_desecho = desecho["cantidad"].sum()
+        n_cedis_desecho = desecho["destino"].nunique()
+        st.markdown(
+            f'<div style="background-color:#FDEDEC; border-left:6px solid {COLOR_CRITICO}; '
+            f'border-radius:8px; padding:14px 18px; margin-bottom:12px;">'
+            f'<span style="color:{COLOR_CRITICO}; font-weight:800; font-size:1.1rem;">'
+            f'🚨 Inventario DESECHO detectado en {n_cedis_desecho} CEDI(s): '
+            f'{total_desecho:,.0f} unds.</span></div>',
+            unsafe_allow_html=True,
+        )
+        tabla_desecho = desecho.rename(
+            columns={"destino": "CEDI", "referencia": "Referencia", "cantidad": "Cantidad"}
+        )
+        st.dataframe(
+            tabla_desecho.style.format({"Cantidad": "{:,.0f}"}),
+            use_container_width=True, hide_index=True,
+        )
+        st.divider()
 
     ARCHIVO_BD_RUP = resolver_archivo(
         "BD Rupturas - Hoja 1.csv",
