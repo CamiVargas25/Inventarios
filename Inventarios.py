@@ -1036,6 +1036,7 @@ def construir_analisis(inv_ayer, inv_hoy, ventas, dias=1, venta_peps=None, cat_m
         # Diagnóstico textual. Con una ventana de 'dias', un lote puede envejecer
         # legítimamente hasta +dias; solo un salto MAYOR a eso es anómalo.
         edades_real = list(vh.keys())
+        node_max_real = max(edades_real) if edades_real else 0
         edad_max_real = max(edades_real) if edades_real else 0
         salto = edad_max_real - (edad_mas_vieja_ayer - dias)  # edad original más vieja de ayer
         if not ruptura:
@@ -1546,13 +1547,8 @@ HOJA_INV_DESECHO = "inv"  # pestaña de inventario detallado (para detectar DESE
 
 
 @st.cache_data(ttl=3600)
-def leer_desecho_cedis(ruta: str, cache_key: float = 0.0) -> pd.DataFrame:
-    """Lee la pestaña 'inv' y filtra referencias de huevo DESECHO en CEDIs.
-
-    Un destino se considera CEDI si su nombre empieza por 'TAT' (p.ej. TAT
-    BARRANQUILLA, TAT BOGOTA MONTEVIDEO). Se excluyen las plantas (ALKA1,
-    ALKA2, BELLAVISTA, PALMAS, LANZA) y demás destinos que no son CEDI.
-    """
+def leer_desecho_destinos(ruta: str, cache_key: float = 0.0) -> pd.DataFrame:
+    """Lee la pestaña 'inv' y filtra referencias de huevo DESECHO en todos los destinos[cite: 1]."""
     df = pd.read_excel(ruta, sheet_name=HOJA_INV_DESECHO)
     df.columns = [str(c).strip() for c in df.columns]
     out = pd.DataFrame({
@@ -1561,9 +1557,8 @@ def leer_desecho_cedis(ruta: str, cache_key: float = 0.0) -> pd.DataFrame:
         "cantidad": pd.to_numeric(df.get("cantidad"), errors="coerce").fillna(0.0),
     })
     out = out.dropna(subset=["destino"])
-    es_cedi = out["destino"].astype(str).str.strip().str.upper().str.startswith("TAT")
     es_desecho = out["referencia"].astype(str).str.upper().str.contains("DESECHO")
-    out = out[es_cedi & es_desecho & (out["cantidad"] > 0)]
+    out = out[es_desecho & (out["cantidad"] > 0)]
     return (
         out.groupby(["destino", "referencia"], as_index=False)["cantidad"]
         .sum()
@@ -1578,25 +1573,25 @@ def render_modulo_seguimiento():
     )
     st.divider()
 
-    # ----- Alerta de inventario DESECHO en CEDIs -----
+    # ----- Alerta de inventario DESECHO en todos los destinos -----
     try:
-        desecho = leer_desecho_cedis(ARCHIVO_HOY, mtime(ARCHIVO_HOY))
+        desecho = leer_desecho_destinos(ARCHIVO_HOY, mtime(ARCHIVO_HOY))
     except (FileNotFoundError, ValueError):
         desecho = pd.DataFrame()
 
     if not desecho.empty:
         total_desecho = desecho["cantidad"].sum()
-        n_cedis_desecho = desecho["destino"].nunique()
+        n_destinos_desecho = desecho["destino"].nunique()
         st.markdown(
             f'<div style="background-color:#FDEDEC; border-left:6px solid {COLOR_CRITICO}; '
             f'border-radius:8px; padding:14px 18px; margin-bottom:12px;">'
             f'<span style="color:{COLOR_CRITICO}; font-weight:800; font-size:1.1rem;">'
-            f'🚨 Inventario DESECHO detectado en {n_cedis_desecho} CEDI(s): '
+            f'🚨 Inventario DESECHO detectado en {n_destinos_desecho} destino(s): '
             f'{total_desecho:,.0f} unds.</span></div>',
             unsafe_allow_html=True,
         )
         tabla_desecho = desecho.rename(
-            columns={"destino": "CEDI", "referencia": "Referencia", "cantidad": "Cantidad"}
+            columns={"destino": "Destino", "referencia": "Referencia", "cantidad": "Cantidad"}
         )
         st.dataframe(
             tabla_desecho.style.format({"Cantidad": "{:,.0f}"}),
