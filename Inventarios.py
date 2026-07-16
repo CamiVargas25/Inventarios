@@ -1606,6 +1606,18 @@ def render_modulo_seguimiento():
                     f"La hoja '{HOJA_INV_DESECHO}' NO está entre las hojas del archivo. "
                     f"Revisa el nombre exacto (mayúsculas/espacios)."
                 )
+                for candidata in ["Detalle1", "CEDIS", "PLANTAS"]:
+                    if candidata in xl.sheet_names:
+                        df_c = pd.read_excel(ARCHIVO_HOY, sheet_name=candidata)
+                        st.write(f"**Columnas en '{candidata}':**", list(df_c.columns))
+                        st.write(f"Filas en '{candidata}':", len(df_c))
+                        cols_desc = [c for c in df_c.columns
+                                     if "descrip" in str(c).lower() or "articulo" in str(c).lower()]
+                        for col in cols_desc:
+                            vals = df_c[col].astype(str).str.upper().unique()
+                            match = [v for v in vals if "DESECH" in v or "DESHECH" in v]
+                            if match:
+                                st.write(f"  → '{col}' contiene valores DESECHO:", match)
         except Exception as e:
             st.error(f"Error en diagnóstico: {type(e).__name__}: {e}")
 
