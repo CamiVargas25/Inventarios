@@ -1576,8 +1576,38 @@ def render_modulo_seguimiento():
     # ----- Alerta de inventario DESECHO en todos los destinos -----
     try:
         desecho = leer_desecho_destinos(ARCHIVO_HOY, mtime(ARCHIVO_HOY))
-    except (FileNotFoundError, ValueError):
+    except Exception as e:
         desecho = pd.DataFrame()
+        st.warning(
+            f"⚠️ No se pudo leer el inventario DESECHO desde '{ARCHIVO_HOY}': "
+            f"{type(e).__name__}: {e}"
+        )
+
+    # --- Diagnóstico temporal: quita este bloque cuando confirmes la causa ---
+    with st.expander("🔧 Diagnóstico DESECHO (temporal)"):
+        try:
+            xl = pd.ExcelFile(ARCHIVO_HOY)
+            st.write("Hojas encontradas en el archivo:", xl.sheet_names)
+            if HOJA_INV_DESECHO in xl.sheet_names:
+                df_raw = pd.read_excel(ARCHIVO_HOY, sheet_name=HOJA_INV_DESECHO)
+                st.write("Columnas en la hoja 'inv':", list(df_raw.columns))
+                st.write("Filas totales en 'inv':", len(df_raw))
+                if "descripcion_articulo" in df_raw.columns:
+                    valores_unicos = (
+                        df_raw["descripcion_articulo"].astype(str).str.upper().unique()
+                    )
+                    contienen_desecho = [
+                        v for v in valores_unicos if "DESECH" in v or "DESHECH" in v
+                    ]
+                    st.write("Valores con 'DESECH'/'DESHECH' en descripcion_articulo:",
+                             contienen_desecho)
+            else:
+                st.error(
+                    f"La hoja '{HOJA_INV_DESECHO}' NO está entre las hojas del archivo. "
+                    f"Revisa el nombre exacto (mayúsculas/espacios)."
+                )
+        except Exception as e:
+            st.error(f"Error en diagnóstico: {type(e).__name__}: {e}")
 
     if not desecho.empty:
         total_desecho = desecho["cantidad"].sum()
