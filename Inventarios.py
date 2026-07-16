@@ -364,12 +364,12 @@ HOJA_INV_DETALLE = "inv"  # hoja de inventario detallado (crudo ERP): trae las
 
 @st.cache_data(ttl=3600)
 def cargar_desecho_por_planta(ruta: str, cache_key: float = 0.0) -> pd.DataFrame:
-    """Lee la hoja 'inv' y agrupa por planta/CEDI ('descripcion') el inventario
+    """Lee la hoja 'inv' y agrupa por planta/CEDI ('id_item_bodega2') el inventario
     cuya referencia contiene la palabra 'desecho'."""
     df = pd.read_excel(ruta, sheet_name=HOJA_INV_DETALLE)
     df.columns = [str(c).strip() for c in df.columns]
     out = pd.DataFrame({
-        "planta": df.get("descripcion"),
+        "planta": df.get("id_item_bodega2"),
         "referencia": df.get("descripcion_articulo"),
         "cantidad": pd.to_numeric(df.get("cantidad"), errors="coerce").fillna(0.0),
     })
