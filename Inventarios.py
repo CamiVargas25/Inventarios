@@ -358,6 +358,32 @@ def cargar_datos_edades(ruta: str, hoja: str, cache_key: float = 0.0) -> pd.Data
     return df
 
 
+HOJA_INV_DETALLE = "inv"  # hoja de inventario detallado (crudo ERP): trae las
+                          # referencias "DESECHO" que no aparecen en INV. EDADES.
+
+
+@st.cache_data(ttl=3600)
+def cargar_desecho_por_planta(ruta: str, cache_key: float = 0.0) -> pd.DataFrame:
+    """Lee la hoja 'inv' y agrupa por planta/CEDI ('descripcion') el inventario
+    cuya referencia contiene la palabra 'desecho'."""
+    df = pd.read_excel(ruta, sheet_name=HOJA_INV_DETALLE)
+    df.columns = [str(c).strip() for c in df.columns]
+    out = pd.DataFrame({
+        "planta": df.get("descripcion"),
+        "referencia": df.get("descripcion_articulo"),
+        "cantidad": pd.to_numeric(df.get("cantidad"), errors="coerce").fillna(0.0),
+    })
+    out = out.dropna(subset=["planta"])
+    es_desecho = out["referencia"].astype(str).str.upper().str.contains("DESECHO", na=False)
+    out = out[es_desecho & (out["cantidad"] > 0)]
+    return (
+        out.groupby("planta", as_index=False)["cantidad"]
+        .sum()
+        .sort_values("cantidad", ascending=False)
+        .reset_index(drop=True)
+    )
+
+
 def render_modulo_edades():
     try:
         df = cargar_datos_edades(ARCHIVO_HOY, HOJA_EDADES_DASH, mtime(ARCHIVO_HOY))
@@ -439,6 +465,42 @@ def render_modulo_edades():
         st.markdown(
             tarjeta_kpi("Unidades con 10+ días", f"{und_mas_10:,.0f}", estado="critical"),
             unsafe_allow_html=True,
+        )
+
+    st.divider()
+    st.subheader("🗑️ Alerta de Inventario Desecho")
+    st.caption(
+        "Referencias cuyo nombre contiene la palabra **desecho**, agrupadas por planta/CEDI."
+    )
+
+    try:
+        desecho = cargar_desecho_por_planta(ARCHIVO_HOY, mtime(ARCHIVO_HOY))
+    except Exception as e:
+        desecho = pd.DataFrame()
+        st.warning(
+            f"⚠️ No se pudo leer el inventario DESECHO desde '{ARCHIVO_HOY}': "
+            f"{type(e).__name__}: {e}"
+        )
+
+    if desecho.empty:
+        st.success("No se detectó inventario DESECHO. 🎉")
+    else:
+        total_desecho = desecho["cantidad"].sum()
+        n_plantas_desecho = desecho["planta"].nunique()
+        st.markdown(
+            f'<div style="background-color:#FDEDEC; border-left:6px solid {COLOR_CRITICO}; '
+            f'padding:12px 16px; border-radius:6px; margin-bottom:12px;">'
+            f'🚨 <b>Inventario DESECHO detectado</b> en {n_plantas_desecho} planta(s)/CEDI: '
+            f'<b>{total_desecho:,.0f} und.</b></div>',
+            unsafe_allow_html=True,
+        )
+        tabla_desecho = desecho.rename(columns={"planta": "Planta/CEDI", "cantidad": "Cantidad"})
+        st.dataframe(
+            tabla_desecho.style.format({"Cantidad": "{:,.0f}"}).bar(
+                subset=["Cantidad"], color="#F5B7B1", align="left", vmin=0
+            ),
+            use_container_width=True,
+            hide_index=True,
         )
 
     st.divider()
