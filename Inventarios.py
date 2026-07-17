@@ -59,6 +59,7 @@ def resolver_archivo(*nombres):
 ARCHIVO_HOY = resolver_archivo("Inventario Hoy.xlsx", "Inventario_Hoy.xlsx")
 ARCHIVO_AYER = resolver_archivo("Inventario Ayer.xlsx", "Inventario_Ayer.xlsx")
 ARCHIVO_VENTAS = resolver_archivo("ventas.xlsx", "Ventas.xlsx", "VENTAS.xlsx")
+ARCHIVO_PEDIDOS = resolver_archivo("19.1 Pedidos.xlsx", "19.1_Pedidos.xlsx")
 HOJA_EDADES_DASH = "INV. EDADES"   # hoja para el módulo 1 (dashboard de edades)
 HOJA_INV_ANALISIS = "INV. EDADES"  # hoja para el módulo 2 (análisis de rotación)
 
@@ -784,6 +785,61 @@ def map_bodega(desc):
     return None, "sin mapeo"
 
 
+# --- Clasificación planta vs CEDI, y despacho de plantas hacia otros CEDIs -------
+# Las plantas despachan producto hacia otros CEDIs y ese movimiento no queda
+# registrado como venta; para esos destinos el "vendido" del PEPS se completa con
+# lo despachado según 19.1 Pedidos.xlsx (ver leer_despachos_planta).
+PLANTAS = {"ALKA1", "ALKA2", "BELLAVISTA", "BODEGA EVENTUALIDAD", "LANZA", "PALMAS"}
+
+
+def tipo_destino(destino: str) -> str:
+    """'CEDI' si el destino es un TAT; 'PLANTA' en caso contrario."""
+    return "CEDI" if "TAT" in norm(destino) else "PLANTA"
+
+
+def planta_por_bodega(codigo_bodega) -> str | None:
+    """Clasifica un código crudo de 'id_bodega_inventario' (Pedidos) en su planta,
+    por coincidencia de texto: cubre variantes como EMALKA2, EMINKI, PAL01/02 que no
+    aparecen en la lista base de códigos pero son sub-bodegas de la misma planta
+    (validado contra los códigos reales de 19.1 Pedidos.xlsx). None si no es de planta."""
+    c = norm(codigo_bodega)
+    if "ALKA2" in c:
+        return "ALKA2"
+    if "ALKA" in c:
+        return "ALKA1"
+    if "KIGT" in c:
+        return "BODEGA EVENTUALIDAD"
+    if "KI" in c:
+        return "LANZA"
+    if "BE" in c:
+        return "BELLAVISTA"
+    if "PAL" in c:
+        return "PALMAS"
+    return None
+
+
+@st.cache_data(ttl=3600)
+def leer_despachos_planta(ruta: str, cache_key: float = 0.0) -> pd.DataFrame:
+    """Lee 19.1 Pedidos.xlsx y calcula lo despachado desde cada planta hacia otros
+    CEDIs: exige documento de entrega (id_doc_entrega no vacío = sí se despachó),
+    agrupa el 'id_bodega_inventario' crudo en su planta y normaliza el item para
+    cruzar con el inventario. La fecha/hora usada es 'fec_doc_entrega' (fecha del
+    documento de entrega), no 'fecha_despacho' (fecha planeada), porque es la que
+    tiene más datos y refleja cuándo realmente se confirmó la salida. Se conserva
+    la hora completa para poder filtrar luego solo lo confirmado después de las 8am."""
+    df = pd.read_excel(ruta, sheet_name=0)
+    df.columns = [str(c).strip() for c in df.columns]
+    df = df[df["id_doc_entrega"].notna()].copy()
+    df["destino"] = df["id_bodega_inventario"].apply(planta_por_bodega)
+    df = df.dropna(subset=["destino"])
+    df["item"] = norm_item(df["id_item"])
+    df["cantidad"] = pd.to_numeric(df["cantidad_entregada"], errors="coerce").fillna(0.0)
+    df["fecha_doc_entrega"] = pd.to_datetime(df["fec_doc_entrega"], errors="coerce")
+    return df[["destino", "item", "descripcion_articulo", "cantidad", "fecha_doc_entrega"]].rename(
+        columns={"descripcion_articulo": "referencia"}
+    )
+
+
 def lider_por_destino(destino: str) -> str:
     """Devuelve el líder responsable del destino según la clasificación de zonas."""
     d = norm(str(destino))
@@ -1066,7 +1122,17 @@ def construir_analisis(inv_ayer, inv_hoy, ventas, dias=1, venta_peps=None, cat_m
         for e_hoy_coh in va_env.keys():
             salida_por_edad[e_hoy_coh] = max(0.0, va_env.get(e_hoy_coh, 0.0) - vh.get(e_hoy_coh, 0.0))
 
-        if vendido < tot_ayer - 0.5:
+        # En CEDI (solo distribuye) se asume que si vendió >= todo lo de ayer, no puede
+        # quedar nada viejo varado. En PLANTA ese supuesto no aplica: produce huevo
+        # fresco el mismo día y lo despacha sin que pase por el inventario de la
+        # mañana, así que el despacho puede superar el inventario de ayer sin que el
+        # lote viejo se haya movido un solo huevo. Por eso en planta siempre se revisa
+        # lote a lote, y además cuenta como "rotó" cuando el despacho no se explica con
+        # los lotes de ayer (salida_por_edad): salió producto fresco en vez del viejo.
+        es_planta = dest in PLANTAS
+        salio_producto_fresco = es_planta and (vendido - sum(salida_por_edad.values()) > 0.5)
+
+        if es_planta or vendido < tot_ayer - 0.5:
             for e_ayer, c_ayer_coh in va.items():
                 e_hoy_coh = e_ayer + dias
                 c_real = vh.get(e_hoy_coh, 0.0)
@@ -1078,16 +1144,17 @@ def construir_analisis(inv_ayer, inv_hoy, ventas, dias=1, venta_peps=None, cat_m
                 exceso = c_real - c_teo
                 if exceso <= 0.5:
                     continue
-                # ¿Salió producto de algún lote MÁS NUEVO que este (edad menor)?
+                # ¿Salió producto de algún lote MÁS NUEVO que este (edad menor), o
+                # (solo en planta) producto fresco del día que nunca pasó por inventario?
                 rotó_un_lote_mas_nuevo = any(
                     e_otro < e_hoy_coh and sal > 0.5
                     for e_otro, sal in salida_por_edad.items()
                 )
-                if rotó_un_lote_mas_nuevo:
+                if rotó_un_lote_mas_nuevo or salio_producto_fresco:
                     varado += exceso            # ruptura de orden real
                     detalle_varado.append((e_hoy_coh, exceso))
-                # Si NO rotó nada más nuevo, el exceso es producto a bordo / no rotación:
-                # no se cuenta como varado.
+                # Si NO rotó nada más nuevo (ni salió producto fresco en planta), el
+                # exceso es producto a bordo / no rotación: no se cuenta como varado.
 
         ep_teo = edad_ponderada(teorico)
         ep_real = edad_ponderada(vh)
@@ -1222,8 +1289,43 @@ def render_modulo_rotacion():
     venta_peps, cat_map, _, dias_rango = preparar_ventas_peps(
         ventas, fecha_corte_obj, dias)
 
+    # --- Despacho de plantas hacia otros CEDIs (movimiento que la venta no ve) ---
+    # Para destinos de planta, el "vendido" del PEPS = SOLO lo despachado según
+    # 19.1 Pedidos.xlsx (fec_doc_entrega en la fecha de corte, después de las 8am).
+    # Se descarta la venta directa que ventas.xlsx pudiera mapear a estos destinos
+    # (p.ej. BODEGA KIKES->LANZA), para que refleje exactamente lo registrado en
+    # Pedidos. CEDI no cambia: sigue usando venta_peps (ventas.xlsx) tal cual.
+    try:
+        despachos = leer_despachos_planta(ARCHIVO_PEDIDOS, mtime(ARCHIVO_PEDIDOS))
+        es_fecha_corte = despachos["fecha_doc_entrega"].dt.date == fecha_corte_obj
+        es_despues_8am = despachos["fecha_doc_entrega"].dt.time > _dt.time(8, 0)
+        desp_hoy = despachos[es_fecha_corte & es_despues_8am]
+        despacho_map = desp_hoy.groupby(["destino", "item"])["cantidad"].sum().to_dict()
+    except FileNotFoundError:
+        despacho_map = {}
+        st.warning(
+            f"No se encontró **{ARCHIVO_PEDIDOS}**: las rupturas de planta se calcularán "
+            "con 0 despacho (no hay venta directa de respaldo)."
+        )
+    venta_peps = {clave: cant for clave, cant in venta_peps.items() if clave[0] not in PLANTAS}
+    venta_peps.update(despacho_map)
+
     res, no_map = construir_analisis(inv_ayer, inv_hoy, ventas, dias=dias,
                                      venta_peps=venta_peps, cat_map=cat_map)
+
+    f_tipo_destino = st.radio(
+        "Tipo de destino",
+        ["Todos", "CEDI (TAT)", "Planta"],
+        horizontal=True,
+        help="CEDI = destinos TAT, rotación por venta (sin cambios). Planta = ALKA1/ALKA2/"
+             "BELLAVISTA/BODEGA EVENTUALIDAD/LANZA/PALMAS, rotación por venta directa + "
+             "despacho hacia otros CEDIs (19.1 Pedidos.xlsx).",
+    )
+    if f_tipo_destino == "CEDI (TAT)":
+        res = res[res["destino"].apply(tipo_destino) == "CEDI"]
+    elif f_tipo_destino == "Planta":
+        res = res[res["destino"].apply(tipo_destino) == "PLANTA"]
+
     rupturas = res[res["ruptura"]].copy()
 
     if dias_rango > 1:
@@ -1330,14 +1432,15 @@ def render_modulo_rotacion():
             st.dataframe(styler, use_container_width=True, hide_index=True)
 
             st.markdown("##### Detalle por lote de la ruptura seleccionada")
+            rupturas_orden = rupturas.sort_values(["destino", "unds_varadas"], ascending=[True, False])
             opciones_rup = [
                 f"{r.destino} — {int(r.item) if str(r.item).isdigit() else r.item} — {r.referencia}"
-                for r in rupturas.sort_values("unds_varadas", ascending=False).itertuples()
+                for r in rupturas_orden.itertuples()
             ]
             sel = st.selectbox("Selecciona una ruptura para ver el detalle lote a lote", opciones_rup)
             if sel:
                 idx = opciones_rup.index(sel)
-                r = rupturas.sort_values("unds_varadas", ascending=False).iloc[idx]
+                r = rupturas_orden.iloc[idx]
 
                 st.caption(
                     f"Cada fila sigue un **lote** desde su edad de ayer hasta hoy (envejece +{dias} día(s)). "
@@ -2037,7 +2140,8 @@ with st.sidebar:
         "Sube a la raíz del repositorio (con espacio o guion bajo):\n\n"
         f"• **{ARCHIVO_HOY}**\n\n"
         f"• **{ARCHIVO_AYER}**\n\n"
-        f"• **{ARCHIVO_VENTAS}**"
+        f"• **{ARCHIVO_VENTAS}**\n\n"
+        f"• **{ARCHIVO_PEDIDOS}**"
     )
 
 if modulo == "Inventario de Edades":
