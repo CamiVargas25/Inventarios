@@ -1131,6 +1131,10 @@ def construir_analisis(inv_ayer, inv_hoy, ventas, dias=1, venta_peps=None, cat_m
         # los lotes de ayer (salida_por_edad): salió producto fresco en vez del viejo.
         es_planta = dest in PLANTAS
         salio_producto_fresco = es_planta and (vendido - sum(salida_por_edad.values()) > 0.5)
+        # Tolerancia solo en planta: el modelo ahí es más ruidoso (producción del mismo
+        # día, ajustes no vistos), así que se ignora un exceso menor al 10% de lo que
+        # había ayer en ese lote específico. CEDI no cambia (tolerancia = 0).
+        UMBRAL_TOLERANCIA_PLANTA = 0.10
 
         if es_planta or vendido < tot_ayer - 0.5:
             for e_ayer, c_ayer_coh in va.items():
@@ -1142,7 +1146,8 @@ def construir_analisis(inv_ayer, inv_hoy, ventas, dias=1, venta_peps=None, cat_m
                     inflado += c_real - c_ayer_coh
                     continue
                 exceso = c_real - c_teo
-                if exceso <= 0.5:
+                tolerancia = c_ayer_coh * UMBRAL_TOLERANCIA_PLANTA if es_planta else 0.0
+                if exceso <= max(0.5, tolerancia):
                     continue
                 # ¿Salió producto de algún lote MÁS NUEVO que este (edad menor), o
                 # (solo en planta) producto fresco del día que nunca pasó por inventario?
