@@ -35,11 +35,44 @@ st.set_page_config(
     layout="wide",
 )
 
+# --- Paleta de marca (identidad Huevos Kikes) ------------------------------
 COLOR_PRIMARIO = "#3DAE2B"   # verde Kikes
 COLOR_ACENTO = "#F7941D"     # naranja (yema del logo)
-COLOR_TEXTO = "#1A1A1A"
-COLOR_CRITICO = "#D0021B"
-COLOR_ADV = "#F5A623"
+
+# --- Tintas y superficies (capa neutra sobre la que respira la marca) ------
+# Los grises llevan una pizca de verde para que el neutro no pelee con la marca.
+TINTA = "#16211B"            # texto principal
+TINTA_2 = "#5A635D"          # texto secundario
+TINTA_3 = "#8A928C"          # texto tenue (ejes, notas al pie)
+SUPERFICIE = "#FFFFFF"       # superficie de tarjeta / gráfico
+PLANO = "#F5F7F4"            # fondo de página (deja flotar las tarjetas)
+BORDE = "#E3E8E1"            # filete de 1px
+REJILLA = "#EDF1EB"          # línea de rejilla de los gráficos
+
+COLOR_TEXTO = TINTA          # se conserva el nombre por compatibilidad
+
+# --- Escala de severidad (semáforo de edades) ------------------------------
+# Rampa ordinal de "calor semántico": el orden lo da la posición (eje de días)
+# y el número siempre está visible, así que el color solo refuerza.
+# Validada con scripts/validate_palette.js del skill dataviz sobre superficie
+# blanca: separación CVD 11.3 y de visión normal 16.7 entre pares adyacentes
+# (ambas por encima del umbral). El amarillo queda fuera de la banda de
+# luminosidad y por debajo de 3:1 de contraste —inevitable en un amarillo—,
+# cubierto por la regla de relieve: la cifra de edad siempre se ve y hay
+# leyenda de convención.
+SEV_OPTIMO = "#3DAE2B"       # 1–4 días
+SEV_ALERTA = "#F2C230"       # 5 días
+SEV_PREOCUPANTE = "#E2611A"  # 6–9 días
+SEV_CRITICO = "#B3141F"      # 10+ días
+
+COLOR_CRITICO = SEV_CRITICO  # rojo único en toda la app (UI + datos)
+COLOR_ADV = SEV_PREOCUPANTE  # ámbar de advertencia
+
+# Tintes suaves para fondos de banner y celdas (texto oscuro encima).
+TINTE_CRITICO = "#FCEEEF"
+TINTE_ADV = "#FDF2E6"
+TINTE_OK = "#EFF8EC"
+TINTE_INFO = "#EEF3F8"
 
 # Archivos esperados en la raíz del repositorio.
 # Se aceptan variantes con espacio o guion bajo (p.ej. "Inventario Hoy.xlsx"
@@ -60,8 +93,13 @@ ARCHIVO_HOY = resolver_archivo("Inventario Hoy.xlsx", "Inventario_Hoy.xlsx")
 ARCHIVO_AYER = resolver_archivo("Inventario Ayer.xlsx", "Inventario_Ayer.xlsx")
 ARCHIVO_VENTAS = resolver_archivo("ventas.xlsx", "Ventas.xlsx", "VENTAS.xlsx")
 ARCHIVO_PEDIDOS = resolver_archivo("19.1 Pedidos.xlsx", "19.1_Pedidos.xlsx")
+ARCHIVO_INVENTARIOS = resolver_archivo("Inventarios.xlsx", "inventarios.xlsx")
+ARCHIVO_KARDEX = resolver_archivo("kardex.xlsx", "Kardex.xlsx", "KARDEX.xlsx")
 HOJA_EDADES_DASH = "INV. EDADES"   # hoja para el módulo 1 (dashboard de edades)
 HOJA_INV_ANALISIS = "INV. EDADES"  # hoja para el módulo 2 (análisis de rotación)
+HOJA_TRANSITO = "Inventarios"      # hoja de Inventarios.xlsx con el inventario en tránsito
+HOJA_KARDEX = "Kardex"             # hoja de kardex.xlsx con los movimientos E/S de las VT
+UMBRAL_DIAS_TRANSITO = 3           # días en tránsito a partir de los cuales se considera varado
 
 
 def mtime(ruta: str) -> float:
@@ -75,72 +113,180 @@ def mtime(ruta: str) -> float:
         return 0.0
 
 # Estilos compartidos
+# Inter para interfaz y cifras (lectura neutra, ejecutiva); Nunito se reserva
+# para el logotipo del panel, que es donde la marca debe sonar.
 st.markdown(
     f"""
     <style>
-        @import url('https://fonts.googleapis.com/css2?family=Nunito:wght@400;700;800;900&display=swap');
-        html, body, [class*="css"] {{
-            font-family: 'Nunito', sans-serif;
-        }}
-        .titulo-principal {{
-            color: {COLOR_PRIMARIO};
-            font-family: 'Nunito', sans-serif;
-            font-size: 4.2rem;
-            font-weight: 900;
-            line-height: 1.05;
-            letter-spacing: -1.5px;
-            margin-bottom: 0.2rem;
-            display: inline-block;
-            border-bottom: 7px solid {COLOR_ACENTO};
-            padding-bottom: 0.15rem;
-        }}
-        .titulo-modulo {{
-            color: {COLOR_PRIMARIO};
-            font-family: 'Nunito', sans-serif;
-            font-size: 3.2rem;
-            font-weight: 900;
-            line-height: 1.05;
-            letter-spacing: -1.2px;
-            margin-bottom: 0.2rem;
-            display: inline-block;
-            border-bottom: 6px solid {COLOR_ACENTO};
-            padding-bottom: 0.15rem;
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Nunito:wght@800;900&display=swap');
+
+        html, body, [class*="css"], .stMarkdown, .stDataFrame {{
+            font-family: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
+            -webkit-font-smoothing: antialiased;
         }}
 
-        /* ----- Tarjetas KPI personalizadas con acento condicional ----- */
+        /* ----- Plano de página: las tarjetas blancas flotan sobre él ----- */
+        .stApp {{ background-color: {PLANO}; }}
+        .block-container {{ padding-top: 2.4rem; padding-bottom: 3.5rem; max-width: 1500px; }}
+
+        h1, h2, h3, h4, h5, h6 {{ color: {TINTA}; letter-spacing: -0.015em; }}
+
+        /* ----- Encabezado de módulo (kicker + título + bajada) ----- */
+        .enc-wrap {{ margin: 0 0 1.6rem 0; }}
+        .enc-kicker {{
+            display: inline-flex; align-items: center; gap: 7px;
+            font-size: 0.7rem; font-weight: 700; letter-spacing: 0.13em;
+            text-transform: uppercase; color: {COLOR_PRIMARIO};
+            margin-bottom: 0.5rem;
+        }}
+        .enc-kicker::before {{
+            content: ""; width: 16px; height: 3px; border-radius: 2px;
+            background: {COLOR_ACENTO};
+        }}
+        .enc-titulo {{
+            color: {TINTA}; font-size: 2.15rem; font-weight: 800;
+            letter-spacing: -0.028em; line-height: 1.12; margin: 0;
+        }}
+        .enc-sub {{
+            color: {TINTA_2}; font-size: 0.95rem; font-weight: 400;
+            margin: 0.4rem 0 0 0; max-width: 78ch; line-height: 1.5;
+        }}
+
+        /* ----- Título de sección ----- */
+        .sec-titulo {{
+            display: flex; align-items: center; gap: 9px;
+            font-size: 1.12rem; font-weight: 700; color: {TINTA};
+            letter-spacing: -0.012em; margin: 0 0 0.15rem 0;
+        }}
+        .sec-titulo::before {{
+            content: ""; width: 4px; height: 17px; border-radius: 2px;
+            background: {COLOR_PRIMARIO}; flex: none;
+        }}
+        .sec-sub {{
+            color: {TINTA_2}; font-size: 0.875rem; line-height: 1.5;
+            margin: 0 0 0.85rem 13px; max-width: 92ch;
+        }}
+
+        /* ----- Tarjetas KPI (stat tiles) ----- */
         .kpi-card {{
-            background-color: #FFFFFF;
-            border: 1px solid #E6E6E6;
-            border-left: 7px solid #9AA0A6;
-            border-radius: 10px;
-            padding: 16px 18px;
-            height: 100%;
-            box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+            position: relative; background-color: {SUPERFICIE};
+            border: 1px solid {BORDE}; border-radius: 14px;
+            padding: 18px 18px 16px 18px; height: 100%;
+            box-shadow: 0 1px 2px rgba(22,33,27,0.04);
+            overflow: hidden;
+        }}
+        /* El acento es una barra superior fina, no un bloque lateral grueso. */
+        .kpi-card::before {{
+            content: ""; position: absolute; top: 0; left: 0; right: 0;
+            height: 3px; background: {TINTA_3};
         }}
         .kpi-card .kpi-label {{
-            color: #4A4A4A;
-            font-size: 0.95rem;
-            font-weight: 700;
-            margin: 0 0 6px 0;
-            line-height: 1.2;
+            color: {TINTA_2}; font-size: 0.735rem; font-weight: 600;
+            letter-spacing: 0.075em; text-transform: uppercase;
+            margin: 0 0 9px 0; line-height: 1.35;
         }}
         .kpi-card .kpi-value {{
-            color: {COLOR_TEXTO};
-            font-size: 1.9rem;
-            font-weight: 900;
-            margin: 0;
-            line-height: 1.1;
+            color: {TINTA}; font-size: 2rem; font-weight: 700;
+            letter-spacing: -0.03em; margin: 0; line-height: 1.05;
         }}
-        .kpi-neutral {{ border-left-color: {COLOR_PRIMARIO}; }}
-        .kpi-warning {{ border-left-color: {COLOR_ADV}; }}
-        .kpi-critical {{ border-left-color: {COLOR_CRITICO}; }}
+        .kpi-neutral::before {{ background: {COLOR_PRIMARIO}; }}
+        .kpi-warning::before {{ background: {COLOR_ADV}; }}
+        .kpi-critical::before {{ background: {COLOR_CRITICO}; }}
+
+        /* Tarjeta protagonista: una sola por vista. */
         .kpi-reina {{
-            background: linear-gradient(135deg, #F2FAF0 0%, #FFFFFF 100%);
-            border-left: 9px solid {COLOR_PRIMARIO};
-            border-top: 1px solid {COLOR_PRIMARIO}33;
+            background: linear-gradient(160deg, {TINTE_OK} 0%, {SUPERFICIE} 62%);
+            border-color: {COLOR_PRIMARIO}2E;
         }}
-        .kpi-reina .kpi-label {{ color: {COLOR_PRIMARIO}; font-size: 1rem; }}
-        .kpi-reina .kpi-value {{ font-size: 2.2rem; }}
+        .kpi-reina::before {{ background: {COLOR_PRIMARIO}; height: 3px; }}
+        .kpi-reina .kpi-label {{ color: {COLOR_PRIMARIO}; }}
+        .kpi-reina .kpi-value {{ font-size: 2.5rem; }}
+
+        /* ----- Banners de alerta ----- */
+        .banner {{
+            display: flex; gap: 12px; align-items: flex-start;
+            border: 1px solid {BORDE}; border-left-width: 4px;
+            border-radius: 11px; padding: 13px 16px; margin-bottom: 13px;
+            font-size: 0.93rem; line-height: 1.5; color: {TINTA};
+        }}
+        .banner .banner-ico {{ font-size: 1.05rem; line-height: 1.35; flex: none; }}
+        .banner b {{ font-weight: 700; }}
+        .banner-critico {{ background: {TINTE_CRITICO}; border-left-color: {COLOR_CRITICO}; }}
+        .banner-adv {{ background: {TINTE_ADV}; border-left-color: {COLOR_ADV}; }}
+        .banner-ok {{ background: {TINTE_OK}; border-left-color: {COLOR_PRIMARIO}; }}
+        .banner-info {{ background: {TINTE_INFO}; border-left-color: #4A7FB5; }}
+
+        /* ----- Barra lateral ----- */
+        section[data-testid="stSidebar"] {{
+            background-color: {SUPERFICIE};
+            border-right: 1px solid {BORDE};
+        }}
+        section[data-testid="stSidebar"] .block-container {{ padding-top: 1.6rem; }}
+        .marca {{
+            display: flex; align-items: center; gap: 10px; margin-bottom: 2px;
+        }}
+        .marca-logo {{
+            width: 36px; height: 36px; border-radius: 10px; flex: none;
+            background: linear-gradient(140deg, {COLOR_PRIMARIO} 0%, #2E9020 100%);
+            display: flex; align-items: center; justify-content: center;
+            font-size: 1.15rem;
+        }}
+        .marca-txt {{ line-height: 1.15; }}
+        .marca-nombre {{
+            font-family: 'Nunito', sans-serif; font-size: 1.05rem;
+            font-weight: 900; color: {TINTA}; letter-spacing: -0.02em;
+        }}
+        .marca-sub {{
+            font-size: 0.69rem; font-weight: 600; letter-spacing: 0.1em;
+            text-transform: uppercase; color: {TINTA_3};
+        }}
+        .nav-rotulo {{
+            font-size: 0.68rem; font-weight: 700; letter-spacing: 0.12em;
+            text-transform: uppercase; color: {TINTA_3};
+            margin: 0.3rem 0 0.5rem 0;
+        }}
+
+        /* Navegación: el radio se lee como lista de secciones, no como formulario. */
+        section[data-testid="stSidebar"] div[role="radiogroup"] {{ gap: 3px; }}
+        section[data-testid="stSidebar"] div[role="radiogroup"] > label {{
+            padding: 9px 12px; border-radius: 9px; width: 100%;
+            transition: background-color .13s ease;
+        }}
+        section[data-testid="stSidebar"] div[role="radiogroup"] > label:hover {{
+            background-color: {PLANO};
+        }}
+        section[data-testid="stSidebar"] div[role="radiogroup"] > label p {{
+            font-size: 0.9rem; font-weight: 600; color: {TINTA_2};
+        }}
+
+        /* ----- Controles ----- */
+        .stButton > button {{
+            border-radius: 9px; border: 1px solid {BORDE};
+            font-weight: 600; font-size: 0.88rem; color: {TINTA};
+            background: {SUPERFICIE}; transition: all .13s ease;
+        }}
+        .stButton > button:hover {{
+            border-color: {COLOR_PRIMARIO}; color: {COLOR_PRIMARIO};
+            background: {TINTE_OK};
+        }}
+        .stTabs [data-baseweb="tab-list"] {{ gap: 4px; border-bottom: 1px solid {BORDE}; }}
+        .stTabs [data-baseweb="tab"] {{
+            font-weight: 600; font-size: 0.92rem; color: {TINTA_2};
+        }}
+        .stTabs [aria-selected="true"] {{ color: {COLOR_PRIMARIO}; }}
+
+        /* ----- Tablas ----- */
+        .stDataFrame {{
+            border: 1px solid {BORDE}; border-radius: 12px; overflow: hidden;
+        }}
+        .stDataFrame [data-testid="stTable"] {{ font-variant-numeric: tabular-nums; }}
+
+        /* ----- Separadores y notas ----- */
+        hr {{ border-color: {BORDE}; margin: 1.9rem 0 1.5rem 0; }}
+        [data-testid="stCaptionContainer"] p {{
+            color: {TINTA_2}; font-size: 0.855rem; line-height: 1.5;
+        }}
+        div[data-testid="stMetricValue"] {{ font-weight: 700; letter-spacing: -0.02em; }}
     </style>
     """,
     unsafe_allow_html=True,
@@ -159,6 +305,101 @@ def tarjeta_kpi(label, value, estado="neutral", reina=False):
         f'<p class="kpi-label">{label}</p>'
         f'<p class="kpi-value">{value}</p></div>'
     )
+
+
+def encabezado_modulo(kicker: str, titulo: str, subtitulo: str = "") -> str:
+    """Encabezado de módulo: antetítulo de marca + título + bajada explicativa."""
+    sub = f'<p class="enc-sub">{subtitulo}</p>' if subtitulo else ""
+    return (
+        f'<div class="enc-wrap">'
+        f'<div class="enc-kicker">{kicker}</div>'
+        f'<h1 class="enc-titulo">{titulo}</h1>{sub}</div>'
+    )
+
+
+def titulo_seccion(titulo: str, subtitulo: str = "") -> str:
+    """Título de sección con filete verde y bajada opcional."""
+    sub = f'<p class="sec-sub">{subtitulo}</p>' if subtitulo else ""
+    return f'<div class="sec-titulo">{titulo}</div>{sub}'
+
+
+def banner(tono: str, icono: str, texto: str) -> str:
+    """Banner de alerta. tono: 'critico' | 'adv' | 'ok' | 'info'."""
+    return (
+        f'<div class="banner banner-{tono}">'
+        f'<span class="banner-ico">{icono}</span><div>{texto}</div></div>'
+    )
+
+
+def tinta_sobre(fondo_hex: str) -> str:
+    """Blanco o tinta oscura según la luminancia del relleno, para que una
+    etiqueta puesta DENTRO de una marca de color siempre tenga contraste."""
+    h = str(fondo_hex).lstrip("#")
+    if len(h) != 6:
+        return "#FFFFFF"
+    try:
+        r, g, b = (int(h[i:i + 2], 16) / 255 for i in (0, 2, 4))
+    except ValueError:
+        return "#FFFFFF"
+
+    def lin(c):
+        return c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
+
+    lum = 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b)
+    return "#FFFFFF" if lum < 0.42 else "#16211B"
+
+
+def color_severidad_edad(edad) -> str:
+    """Color del semáforo de edades. Fuente única de verdad para el gráfico y la
+    tabla, para que ninguno de los dos se desvíe de la convención publicada:
+    1–4 óptimo · 5 alerta · 6–9 preocupante · 10+ crítico."""
+    try:
+        v = float(edad)
+    except (TypeError, ValueError):
+        return TINTA_3
+    if v >= 10:
+        return SEV_CRITICO
+    if v >= 6:
+        return SEV_PREOCUPANTE
+    if v >= 5:
+        return SEV_ALERTA
+    return SEV_OPTIMO
+
+
+# --- Tema compartido de gráficos -------------------------------------------
+FUENTE_GRAFICO = "Inter, system-ui, -apple-system, 'Segoe UI', sans-serif"
+
+
+def estilo_grafico(fig, alto=340, mostrar_leyenda=False, margen=None):
+    """Aplica el cromado común a una figura Plotly: ejes y rejilla recesivos
+    (filete sólido de 1px, nunca punteado), tipografía de interfaz y fondo
+    transparente para que herede la superficie de la tarjeta."""
+    fig.update_layout(
+        height=alto,
+        margin=margen or dict(l=8, r=18, t=8, b=8),
+        plot_bgcolor="rgba(0,0,0,0)",
+        paper_bgcolor="rgba(0,0,0,0)",
+        font=dict(family=FUENTE_GRAFICO, size=12.5, color=TINTA_2),
+        showlegend=mostrar_leyenda,
+        legend=dict(
+            orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0,
+            font=dict(size=12, color=TINTA_2), bgcolor="rgba(0,0,0,0)",
+        ),
+        hoverlabel=dict(
+            bgcolor=SUPERFICIE, bordercolor=BORDE,
+            font=dict(family=FUENTE_GRAFICO, size=12.5, color=TINTA),
+        ),
+    )
+    eje = dict(
+        showgrid=False, zeroline=False,
+        linecolor=BORDE, linewidth=1,
+        tickfont=dict(size=11.5, color=TINTA_3),
+        title_font=dict(size=12, color=TINTA_3),
+    )
+    fig.update_xaxes(**eje)
+    fig.update_yaxes(**eje, gridcolor=REJILLA)
+    fig.update_yaxes(showgrid=True, griddash="solid")
+    return fig
 
 
 # ===========================================================================
@@ -385,6 +626,113 @@ def cargar_desecho_por_planta(ruta: str, cache_key: float = 0.0) -> pd.DataFrame
     )
 
 
+@st.cache_data(ttl=3600)
+def cargar_transito_varado_kardex(
+    ruta: str,
+    ruta_snapshot: str,
+    umbral_dias: int,
+    cache_key: float = 0.0,
+    cache_key_snapshot: float = 0.0,
+) -> tuple:
+    """Reconstruye, con lógica PEPS, los lotes de huevo (línea HU, por descripción
+    'HUEVO...') que siguen sin salir de cada bodega de tránsito ('VT...'), a partir
+    del historial de movimientos E/S de 'kardex.xlsx'.
+
+    Por cada (bodega, código_artículo) se procesan los movimientos en orden
+    cronológico real (columna 'datetime'): cada entrada (E) abre un lote nuevo con
+    la fecha de movimiento (columna 'fecha'); cada salida (S) consume primero el
+    lote más antiguo (FIFO/PEPS). Una salida que no encuentra lote que la respalde
+    (p. ej. la primera transacción de la serie es una salida, señal de que hubo una
+    entrada anterior al rango del kardex) se descarta sin efecto: no se resta de
+    ningún lote ni genera saldo negativo. Los lotes que quedan con saldo > 0 al
+    final son el inventario que sigue varado en tránsito, con su fecha de entrada
+    original.
+
+    Cada saldo remanente se cruza además contra el snapshot actual
+    ('Inventarios.xlsx'): si esa combinación bodega+artículo no aparece ahí con
+    cantidad > 0, se marca como 'no confirmada' en vez de descartarse, ya que el
+    kardex por sí solo (con su ventana de historia limitada) no basta para
+    garantizar que el lote sigue físicamente ahí.
+
+    Devuelve (dataframe, n_salidas_huerfanas, snapshot_disponible).
+    """
+    df = pd.read_excel(ruta, sheet_name=HOJA_KARDEX)
+    df.columns = [str(c).strip() for c in df.columns]
+    base = pd.DataFrame({
+        "bodega": df.get("descripcion"),
+        "codigo_bodega": df.get("bodega"),
+        "codigo_articulo": df.get("codigo_articulo").astype(str),
+        "producto": df.get("descripcion_articulo"),
+        "fecha": pd.to_datetime(df.get("fecha"), errors="coerce"),
+        "orden": pd.to_datetime(df.get("datetime"), errors="coerce"),
+        "cantidad": pd.to_numeric(df.get("cantidad"), errors="coerce").fillna(0.0),
+        "tipo_mov": df.get("tipo_mov").astype(str).str.upper().str.strip(),
+    })
+    base = base.dropna(subset=["fecha", "orden"])
+    base = base[base["producto"].astype(str).str.upper().str.startswith("HUEVO")]
+    base = base.sort_values(["codigo_bodega", "codigo_articulo", "orden"])
+
+    filas = []
+    n_huerfanas = 0
+    for (cb, ca), grupo in base.groupby(["codigo_bodega", "codigo_articulo"], sort=False):
+        lotes = []  # cada lote: [fecha_entrada, cantidad_restante]
+        for _, mov in grupo.iterrows():
+            if mov["tipo_mov"] == "E":
+                lotes.append([mov["fecha"], mov["cantidad"]])
+            elif mov["tipo_mov"] == "S":
+                restante = mov["cantidad"]
+                while restante > 0.001 and lotes:
+                    lote = lotes[0]
+                    consumido = min(lote[1], restante)
+                    lote[1] -= consumido
+                    restante -= consumido
+                    if lote[1] <= 0.001:
+                        lotes.pop(0)
+                if restante > 0.001:
+                    n_huerfanas += 1  # salida sin lote que la respalde: se ignora
+        bodega_nombre = grupo["bodega"].iloc[-1]
+        producto_nombre = grupo["producto"].iloc[-1]
+        for fecha_lote, cantidad_lote in lotes:
+            if cantidad_lote > 0.001:
+                filas.append({
+                    "bodega": bodega_nombre,
+                    "codigo_bodega": cb,
+                    "producto": producto_nombre,
+                    "codigo_articulo": ca,
+                    "cantidad": cantidad_lote,
+                    "fecha": fecha_lote,
+                })
+
+    out = pd.DataFrame(filas)
+    if out.empty:
+        return out, n_huerfanas, True
+
+    hoy = pd.Timestamp(_dt.date.today())
+    out["dias_varado"] = (hoy - out["fecha"].dt.normalize()).dt.days
+    out = out[out["dias_varado"] >= umbral_dias].sort_values("dias_varado", ascending=False).reset_index(drop=True)
+
+    try:
+        snap = pd.read_excel(ruta_snapshot, sheet_name=HOJA_TRANSITO)
+        snap.columns = [str(c).strip() for c in snap.columns]
+        snap_cant = pd.to_numeric(snap.get("cantidad"), errors="coerce").fillna(0.0)
+        snap_key = pd.DataFrame({
+            "codigo_bodega": snap.get("codigo_bodega"),
+            "codigo_articulo": snap.get("codigo_articulo").astype(str),
+            "cantidad": snap_cant,
+        })
+        vigentes = snap_key.groupby(["codigo_bodega", "codigo_articulo"])["cantidad"].sum()
+        confirmados = set(vigentes[vigentes > 0].index)
+        snapshot_ok = True
+    except Exception:
+        confirmados = set()
+        snapshot_ok = False
+
+    out["confirmado"] = [
+        (cb, ca) in confirmados for cb, ca in zip(out["codigo_bodega"], out["codigo_articulo"])
+    ]
+    return out, n_huerfanas, snapshot_ok
+
+
 def render_modulo_edades():
     try:
         df = cargar_datos_edades(ARCHIVO_HOY, HOJA_EDADES_DASH, mtime(ARCHIVO_HOY))
@@ -401,8 +749,15 @@ def render_modulo_edades():
         )
         st.stop()
 
-    st.markdown('<p class="titulo-principal">🥚 Inventario de Edades</p>', unsafe_allow_html=True)
-    st.divider()
+    st.markdown(
+        encabezado_modulo(
+            "Panel de inventarios",
+            "Inventario de Edades",
+            "Estado actual del inventario por edad, planta y CEDI, con alertas de "
+            "desecho, tránsito varado y riesgo de vida útil.",
+        ),
+        unsafe_allow_html=True,
+    )
 
     def opciones(col: str):
         if col in df.columns:
@@ -469,43 +824,136 @@ def render_modulo_edades():
         )
 
     st.divider()
-    st.subheader("🗑️ Alerta de Inventario Desecho")
-    st.caption(
-        "Referencias cuyo nombre contiene la palabra **desecho**, agrupadas por planta/CEDI."
+    st.markdown(
+        titulo_seccion(
+            "🗑️ Alerta de inventario desecho",
+            "Referencias cuyo nombre contiene la palabra <b>desecho</b>, agrupadas por planta/CEDI.",
+        ),
+        unsafe_allow_html=True,
     )
 
     try:
         desecho = cargar_desecho_por_planta(ARCHIVO_HOY, mtime(ARCHIVO_HOY))
     except Exception as e:
         desecho = pd.DataFrame()
-        st.warning(
-            f"⚠️ No se pudo leer el inventario DESECHO desde '{ARCHIVO_HOY}': "
-            f"{type(e).__name__}: {e}"
+        st.markdown(
+            banner("adv", "⚠️",
+                   f"No se pudo leer el inventario DESECHO desde '{ARCHIVO_HOY}': "
+                   f"{type(e).__name__}: {e}"),
+            unsafe_allow_html=True,
         )
 
     if desecho.empty:
-        st.success("No se detectó inventario DESECHO. 🎉")
+        st.markdown(
+            banner("ok", "✅", "No se detectó inventario DESECHO."),
+            unsafe_allow_html=True,
+        )
     else:
         total_desecho = desecho["cantidad"].sum()
         n_plantas_desecho = desecho["planta"].nunique()
         st.markdown(
-            f'<div style="background-color:#FDEDEC; border-left:6px solid {COLOR_CRITICO}; '
-            f'padding:12px 16px; border-radius:6px; margin-bottom:12px;">'
-            f'🚨 <b>Inventario DESECHO detectado</b> en {n_plantas_desecho} planta(s)/CEDI: '
-            f'<b>{total_desecho:,.0f} und.</b></div>',
+            banner("critico", "🚨",
+                   f"<b>Inventario DESECHO detectado</b> en {n_plantas_desecho} planta(s)/CEDI: "
+                   f"<b>{total_desecho:,.0f} und.</b>"),
             unsafe_allow_html=True,
         )
         tabla_desecho = desecho.rename(columns={"planta": "Planta/CEDI", "cantidad": "Cantidad"})
         st.dataframe(
             tabla_desecho.style.format({"Cantidad": "{:,.0f}"}).bar(
-                subset=["Cantidad"], color="#F5B7B1", align="left", vmin=0
+                subset=["Cantidad"], color=TINTE_CRITICO, align="left", vmin=0
             ),
             use_container_width=True,
             hide_index=True,
         )
 
     st.divider()
-    st.subheader("Distribución del inventario por edad")
+    st.markdown(
+        titulo_seccion(
+            "🚚 Alerta de inventario varado en tránsito",
+            f"Reconstrucción PEPS de huevo (por descripción 'HUEVO...') a partir de los "
+            f"movimientos E/S de <b>{ARCHIVO_KARDEX}</b>. Por cada bodega+artículo se consume primero "
+            f"el lote más antiguo; lo que queda sin salida y lleva <b>{UMBRAL_DIAS_TRANSITO} días o más</b> "
+            f"desde su entrada se marca como varado. Las salidas huérfanas (sin entrada previa en el "
+            f"kardex) se ignoran sin afectar el resto de la serie. Cada saldo remanente se cruza además "
+            f"contra <b>{ARCHIVO_INVENTARIOS}</b>: si esa combinación bodega+artículo no aparece ahí con "
+            f"cantidad &gt; 0, la fila se muestra igual pero marcada como <b>no confirmada</b>.",
+        ),
+        unsafe_allow_html=True,
+    )
+
+    transito_kdx = pd.DataFrame()
+    n_huerfanas = 0
+    cargo_ok_kdx = False
+    try:
+        transito_kdx, n_huerfanas, snapshot_ok_kdx = cargar_transito_varado_kardex(
+            ARCHIVO_KARDEX, ARCHIVO_INVENTARIOS, UMBRAL_DIAS_TRANSITO,
+            mtime(ARCHIVO_KARDEX), mtime(ARCHIVO_INVENTARIOS),
+        )
+        cargo_ok_kdx = True
+    except FileNotFoundError:
+        st.info(f"Sube **{ARCHIVO_KARDEX}** para activar esta segunda versión (PEPS) de la alerta.")
+    except Exception as e:
+        st.warning(
+            f"⚠️ No se pudo leer el kardex desde '{ARCHIVO_KARDEX}': {type(e).__name__}: {e}"
+        )
+
+    if cargo_ok_kdx:
+        if n_huerfanas:
+            st.caption(f"🧹 {n_huerfanas} salida(s) huérfana(s) detectada(s) e ignorada(s) en el kardex.")
+        if not snapshot_ok_kdx:
+            st.caption(
+                f"⚠️ No se pudo cruzar contra **{ARCHIVO_INVENTARIOS}**; ninguna fila quedó confirmada."
+            )
+
+    if transito_kdx.empty:
+        if cargo_ok_kdx:
+            st.markdown(
+                banner("ok", "✅", "No hay lotes de huevo varados en tránsito según el kardex."),
+                unsafe_allow_html=True,
+            )
+    else:
+        n_lotes = len(transito_kdx)
+        n_bodegas_kdx = transito_kdx["bodega"].nunique()
+        max_dias_kdx = int(transito_kdx["dias_varado"].max())
+        n_no_confirmados = int((~transito_kdx["confirmado"]).sum())
+        st.markdown(
+            banner("critico", "🚨",
+                   f"<b>{n_lotes} lote(s) varados</b> en {n_bodegas_kdx} bodega(s) de tránsito "
+                   f"(hasta <b>{max_dias_kdx} días</b> sin resolver) — "
+                   f"<b>{n_no_confirmados}</b> sin confirmar contra el snapshot actual."),
+            unsafe_allow_html=True,
+        )
+        tabla_kdx = transito_kdx.copy()
+        tabla_kdx["confirmado"] = tabla_kdx["confirmado"].map({True: "✅ Sí", False: "⚠️ No confirmado"})
+        tabla_kdx = tabla_kdx.rename(columns={
+            "bodega": "Bodega tránsito",
+            "codigo_bodega": "Código",
+            "producto": "Producto",
+            "codigo_articulo": "Código artículo",
+            "cantidad": "Cantidad",
+            "fecha": "Fecha entrada (lote)",
+            "dias_varado": "Días varado",
+            "confirmado": "Confirmado en snapshot",
+        })
+        st.dataframe(
+            tabla_kdx.style.format({
+                "Cantidad": "{:,.0f}",
+                "Fecha entrada (lote)": lambda d: d.strftime("%Y-%m-%d %H:%M"),
+                "Días varado": "{:,.0f}",
+            }).bar(subset=["Días varado"], color=TINTE_CRITICO, align="left", vmin=0),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    st.divider()
+    st.markdown(
+        titulo_seccion(
+            "Distribución del inventario por edad",
+            "Unidades en stock por día de edad. El color refuerza el semáforo de "
+            "vida útil; el eje y la cifra sobre cada barra llevan el dato exacto.",
+        ),
+        unsafe_allow_html=True,
+    )
 
     dist = dff.dropna(subset=["edad"]).copy()
     dist["edad_int"] = dist["edad"].astype(int)
@@ -513,41 +961,27 @@ def render_modulo_edades():
     orden_buckets = [str(i) for i in range(1, 10)] + ["10+"]
     serie = dist.groupby("bucket")["cantidad"].sum().reindex(orden_buckets, fill_value=0)
 
-    def color_barra(bucket):
-        if bucket == "10+":
-            return COLOR_CRITICO
-        val = int(bucket)
-        if val <= 5:
-            return COLOR_PRIMARIO
-        elif val <= 9:
-            return COLOR_ADV
-        return COLOR_CRITICO
-
-    colores = [color_barra(b) for b in serie.index]
+    colores = [color_severidad_edad(10 if b == "10+" else int(b)) for b in serie.index]
     fig = go.Figure(
         go.Bar(
             x=list(serie.index),
             y=serie.values,
-            marker_color=colores,
+            marker=dict(color=colores, cornerradius=4),
             text=[f"{v:,.0f}" if v > 0 else "" for v in serie.values],
             textposition="outside",
+            textfont=dict(size=11.5, color=TINTA_2),
+            cliponaxis=False,
             hovertemplate="Edad: %{x} días<br>Cantidad: %{y:,.0f} und<extra></extra>",
         )
     )
-    fig.update_layout(
-        height=360,
-        margin=dict(l=10, r=10, t=10, b=10),
-        plot_bgcolor="rgba(0,0,0,0)",
-        paper_bgcolor="rgba(0,0,0,0)",
-        font=dict(family="Nunito, sans-serif", size=13),
-        xaxis=dict(title="Días de edad del producto", tickmode="linear"),
-        yaxis=dict(title="Unidades", showgrid=True, gridcolor="#EEEEEE"),
-        bargap=0.25,
-    )
+    fig.update_layout(bargap=0.42)
+    estilo_grafico(fig, alto=350, margen=dict(l=8, r=18, t=22, b=8))
+    fig.update_xaxes(title="Días de edad del producto", tickmode="linear")
+    fig.update_yaxes(title="Unidades", separatethousands=True)
     st.plotly_chart(fig, use_container_width=True)
 
     st.divider()
-    st.subheader("Detalle de inventario")
+    st.markdown(titulo_seccion("Detalle de inventario"), unsafe_allow_html=True)
 
     cols_tabla = [c for c in ["destino", "edad", "item", "referencia", "cantidad"] if c in dff.columns]
     tabla = (
@@ -567,20 +1001,21 @@ def render_modulo_edades():
         }
     )
 
+    # Celda del semáforo: tinte suave de fondo + tinta oscura de la misma familia,
+    # para que el número siempre se lea (el color acompaña, no sustituye al dato).
+    TINTA_SEV = {
+        SEV_OPTIMO: ("#E8F5E4", "#1F6B15"),
+        SEV_ALERTA: ("#FDF3D6", "#7A5A00"),
+        SEV_PREOCUPANTE: ("#FCEBDF", "#8A3708"),
+        SEV_CRITICO: ("#FAE4E6", "#8A0F17"),
+    }
+
     def color_edad(val):
-        try:
-            v = float(val)
-        except (TypeError, ValueError):
+        sev = color_severidad_edad(val)
+        if sev not in TINTA_SEV:
             return ""
-        if 1 <= v <= 4:
-            return "background-color: #C6EFCE; color: #006100; font-weight: 700;"
-        elif v == 5:
-            return "background-color: #FFE08A; color: #7A5200; font-weight: 700;"
-        elif 6 <= v <= 9:
-            return "background-color: #FFB84D; color: #7A3E00; font-weight: 800;"
-        elif v >= 10:
-            return "background-color: #FF8A80; color: #7A0006; font-weight: 800;"
-        return ""
+        fondo, tinta = TINTA_SEV[sev]
+        return f"background-color: {fondo}; color: {tinta}; font-weight: 700;"
 
     if "Item" in tabla.columns:
         tabla["Item"] = pd.to_numeric(tabla["Item"], errors="coerce").astype("Int64")
@@ -588,24 +1023,37 @@ def render_modulo_edades():
     styler = (
         tabla.style
         .map(color_edad, subset=["Edad"])
-        .bar(subset=["Suma de Cantidad"], color="#BFE3B5", align="left", height=70, vmin=0)
+        .bar(subset=["Suma de Cantidad"], color=TINTE_OK, align="left", height=70, vmin=0)
         .format({"Suma de Cantidad": "{:,.0f}", "Edad": "{:.0f}", "Item": "{:.0f}"})
     )
     st.dataframe(styler, use_container_width=True, hide_index=True, height=600)
 
     st.markdown(
-        """
-        **Convención de edades:**
-        🟢 1–4 días: óptimo &nbsp;&nbsp; 🟡 5 días: alerta &nbsp;&nbsp; 🟠 6–9 días: preocupante &nbsp;&nbsp; 🔴 10+ días: crítico
-        &nbsp;&nbsp;|&nbsp;&nbsp; Las barras en *Suma de Cantidad* son proporcionales al volumen de cada fila.
-        """
+        f"""
+        <div style="display:flex; flex-wrap:wrap; gap:18px; align-items:center;
+                    font-size:0.84rem; color:{TINTA_2}; margin-top:10px;">
+          <span style="font-weight:600; color:{TINTA};">Convención de edades</span>
+          <span><span style="display:inline-block;width:10px;height:10px;border-radius:3px;
+                background:{SEV_OPTIMO};margin-right:6px;"></span>1–4 días · óptimo</span>
+          <span><span style="display:inline-block;width:10px;height:10px;border-radius:3px;
+                background:{SEV_ALERTA};margin-right:6px;"></span>5 días · alerta</span>
+          <span><span style="display:inline-block;width:10px;height:10px;border-radius:3px;
+                background:{SEV_PREOCUPANTE};margin-right:6px;"></span>6–9 días · preocupante</span>
+          <span><span style="display:inline-block;width:10px;height:10px;border-radius:3px;
+                background:{SEV_CRITICO};margin-right:6px;"></span>10+ días · crítico</span>
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
     st.divider()
-    st.subheader("⏳ Riesgo de Vida Útil")
-    st.caption(
-        "Proyección a futuro: con el ritmo de venta diaria y la edad actual de cada lote, "
-        "se estima la edad que tendría al venderse bajo PEPS (más viejo primero). "
-        "Se alerta si algún lote proyecta superar **5 días**."
+    st.markdown(
+        titulo_seccion(
+            "⏳ Riesgo de vida útil",
+            "Proyección a futuro: con el ritmo de venta diaria y la edad actual de cada lote, "
+            "se estima la edad que tendría al venderse bajo PEPS (más viejo primero). "
+            "Se alerta si algún lote proyecta superar <b>5 días</b>.",
+        ),
+        unsafe_allow_html=True,
     )
 
     try:
@@ -1221,7 +1669,15 @@ def construir_analisis(inv_ayer, inv_hoy, ventas, dias=1, venta_peps=None, cat_m
 
 
 def render_modulo_rotacion():
-    st.markdown('<p class="titulo-modulo">🔄 Análisis de Rotación PEPS</p>', unsafe_allow_html=True)
+    st.markdown(
+        encabezado_modulo(
+            "Auditoría de rotación",
+            "Análisis de Rotación PEPS",
+            "Compara el inventario inicial de ayer, el consumo del período y el "
+            "inventario de hoy para detectar lotes viejos que no rotaron.",
+        ),
+        unsafe_allow_html=True,
+    )
     st.caption(
         "Compara el inventario inicial de ayer + ventas del período contra el inventario inicial de hoy. "
         "Lógica: se envejece cada lote según los días transcurridos entre cortes, se consume la venta por "
@@ -1402,12 +1858,12 @@ def render_modulo_rotacion():
                 f'title="Descargar rupturas CSV">💔</a>'
             )
             st.markdown(
-                f'<h3 style="margin-bottom:0.2rem; font-size:1.4rem; font-weight:700;">'
-                f'Rupturas de rotación detectadas {_dl_href}</h3>',
+                titulo_seccion(f"Rupturas de rotación detectadas {_dl_href}"),
                 unsafe_allow_html=True,
             )
         else:
-            st.subheader("Rupturas de rotación detectadas")
+            st.markdown(titulo_seccion("Rupturas de rotación detectadas"),
+                        unsafe_allow_html=True)
         st.caption(
             "Producto viejo que, según PEPS, debió salir y permanece en inventario "
             "(o reapareció más viejo de lo posible)."
@@ -1548,11 +2004,15 @@ def render_modulo_rotacion():
 
     # ===== TAB 2: DETALLE POR DESTINO — UNA FILA POR LOTE (cohorte ayer → hoy) =====
     with tab2:
-        st.subheader("Detalle por destino — seguimiento por lote")
-        st.caption(
-            f"Cada fila sigue un **lote** desde su edad de ayer hasta hoy (envejece +{dias} día(s)). "
-            "Los lotes que venían de ayer muestran su evolución; las entradas nuevas del período "
-            "aparecen marcadas aparte. La reconstrucción por lote es un modelo PEPS."
+        st.markdown(
+            titulo_seccion(
+                "Detalle por destino — seguimiento por lote",
+                f"Cada fila sigue un <b>lote</b> desde su edad de ayer hasta hoy (envejece "
+                f"+{dias} día(s)). Los lotes que venían de ayer muestran su evolución; las "
+                "entradas nuevas del período aparecen marcadas aparte. La reconstrucción por "
+                "lote es un modelo PEPS.",
+            ),
+            unsafe_allow_html=True,
         )
 
         destinos = sorted(res["destino"].unique().tolist())
@@ -1724,7 +2184,15 @@ def leer_desecho_destinos(ruta: str, cache_key: float = 0.0) -> pd.DataFrame:
 
 
 def render_modulo_seguimiento():
-    st.markdown('<p class="titulo-modulo">📈 Seguimiento de Rupturas</p>', unsafe_allow_html=True)
+    st.markdown(
+        encabezado_modulo(
+            "Gestión del proceso",
+            "Seguimiento de Rupturas",
+            "Evolución, causas y estado de gestión de las rupturas registradas por "
+            "los líderes de zona.",
+        ),
+        unsafe_allow_html=True,
+    )
     st.caption(
         "Evolución histórica de las rupturas de rotación y nivel de gestión por zona."
     )
@@ -1735,22 +2203,20 @@ def render_modulo_seguimiento():
         desecho = leer_desecho_destinos(ARCHIVO_HOY, mtime(ARCHIVO_HOY))
     except Exception as e:
         desecho = pd.DataFrame()
-        st.warning(
-            f"⚠️ No se pudo leer el inventario DESECHO desde '{ARCHIVO_HOY}': "
-            f"{type(e).__name__}: {e}"
+        st.markdown(
+            banner("adv", "⚠️",
+                   f"No se pudo leer el inventario DESECHO desde '{ARCHIVO_HOY}': "
+                   f"{type(e).__name__}: {e}"),
+            unsafe_allow_html=True,
         )
-
-
 
     if not desecho.empty:
         total_desecho = desecho["cantidad"].sum()
         n_destinos_desecho = desecho["destino"].nunique()
         st.markdown(
-            f'<div style="background-color:#FDEDEC; border-left:6px solid {COLOR_CRITICO}; '
-            f'border-radius:8px; padding:14px 18px; margin-bottom:12px;">'
-            f'<span style="color:{COLOR_CRITICO}; font-weight:800; font-size:1.1rem;">'
-            f'🚨 Inventario DESECHO detectado en {n_destinos_desecho} destino(s): '
-            f'{total_desecho:,.0f} unds.</span></div>',
+            banner("critico", "🚨",
+                   f"<b>Inventario DESECHO detectado</b> en {n_destinos_desecho} destino(s): "
+                   f"<b>{total_desecho:,.0f} unds.</b>"),
             unsafe_allow_html=True,
         )
         tabla_desecho = desecho.rename(
@@ -1941,10 +2407,13 @@ def render_modulo_seguimiento():
     col_donut, col_kpis = st.columns([1, 2], gap="large")
 
     with col_donut:
+        # Medidor: el relleno lleva el avance; la pista es un paso claro del
+        # mismo verde, para que el estado se lea en todo el anillo.
         fig_d = go.Figure(go.Pie(
             values=[max(pct, 0.5), max(100 - pct, 0)],
-            hole=0.72,
-            marker_colors=[COLOR_PRIMARIO, "#D4EDD0"],
+            hole=0.78,
+            marker=dict(colors=[COLOR_PRIMARIO, "#E4F1DF"],
+                        line=dict(color=SUPERFICIE, width=2)),
             textinfo="none",
             hoverinfo="skip",
             direction="clockwise",
@@ -1953,23 +2422,30 @@ def render_modulo_seguimiento():
         ))
         fig_d.update_layout(
             showlegend=False,
-            annotations=[{
-                "text": f"<b>{pct:.0f}%</b>",
-                "x": 0.5, "y": 0.5,
-                "font": {"size": 36, "color": COLOR_TEXTO, "family": "Nunito, sans-serif"},
-                "showarrow": False,
-                "xanchor": "center",
-                "yanchor": "middle",
-            }],
+            annotations=[
+                {
+                    "text": f"<b>{pct:.0f}%</b>",
+                    "x": 0.5, "y": 0.54,
+                    "font": {"size": 38, "color": TINTA, "family": FUENTE_GRAFICO},
+                    "showarrow": False, "xanchor": "center", "yanchor": "middle",
+                },
+                {
+                    "text": "gestionado",
+                    "x": 0.5, "y": 0.34,
+                    "font": {"size": 11.5, "color": TINTA_3, "family": FUENTE_GRAFICO},
+                    "showarrow": False, "xanchor": "center", "yanchor": "middle",
+                },
+            ],
             title=dict(
-                text="Nivel de Gestión",
-                x=0.5, xanchor="center",
-                font=dict(size=13, color="#4A4A4A", family="Nunito, sans-serif"),
+                text="Nivel de gestión",
+                x=0.5, xanchor="center", y=0.97,
+                font=dict(size=12.5, color=TINTA_2, family=FUENTE_GRAFICO),
             ),
-            margin=dict(l=20, r=20, t=45, b=10),
-            height=230,
+            margin=dict(l=16, r=16, t=40, b=8),
+            height=232,
             paper_bgcolor="rgba(0,0,0,0)",
             plot_bgcolor="rgba(0,0,0,0)",
+            font=dict(family=FUENTE_GRAFICO),
         )
         st.plotly_chart(fig_d, use_container_width=True)
 
@@ -1996,7 +2472,14 @@ def render_modulo_seguimiento():
     st.divider()
 
     # --- Evolución de rupturas (líneas) ---
-    st.subheader("Evolución de rupturas")
+    st.markdown(
+        titulo_seccion(
+            "Evolución de rupturas",
+            "Rupturas por fecha de corte. <b>Total</b> va en tinta neutra por ser la "
+            "envolvente (siempre la suma de las otras dos), no una serie más.",
+        ),
+        unsafe_allow_html=True,
+    )
     if "fecha_corte" in base.columns:
         serie = base.groupby(["fecha_corte", "gestionada"]).size().reset_index(name="n")
         pivot = serie.pivot(index="fecha_corte", columns="gestionada", values="n").fillna(0)
@@ -2007,34 +2490,37 @@ def render_modulo_seguimiento():
         pivot = pivot.sort_index()
         pivot["Total"] = pivot["Gestionadas"] + pivot["Pendientes"]
 
+        # 'Total' es la envolvente, no una categoría par: va en tinta neutra.
+        # Antes iba en naranja de marca, que frente al verde de 'Gestionadas'
+        # medía ΔE 0.3 en protanopia (indistinguibles); el neutro lo resuelve y
+        # además lee mejor como línea de referencia.
         fig_l = go.Figure()
         fig_l.add_trace(go.Scatter(
             x=pivot.index, y=pivot["Total"],
             name="Total", mode="lines+markers",
-            line=dict(color=COLOR_ACENTO, width=3),
-            marker=dict(size=7),
+            line=dict(color="#454F49", width=2, shape="linear"),
+            marker=dict(size=8, line=dict(color=SUPERFICIE, width=2)),
+            hovertemplate="%{x|%Y-%m-%d}<br>Total: %{y:,.0f}<extra></extra>",
         ))
         fig_l.add_trace(go.Scatter(
             x=pivot.index, y=pivot["Gestionadas"],
             name="Gestionadas", mode="lines+markers",
             line=dict(color=COLOR_PRIMARIO, width=2),
-            marker=dict(size=6),
+            marker=dict(size=8, line=dict(color=SUPERFICIE, width=2)),
+            hovertemplate="%{x|%Y-%m-%d}<br>Gestionadas: %{y:,.0f}<extra></extra>",
         ))
         fig_l.add_trace(go.Scatter(
             x=pivot.index, y=pivot["Pendientes"],
             name="Pendientes", mode="lines+markers",
             line=dict(color=COLOR_CRITICO, width=2),
-            marker=dict(size=6),
+            marker=dict(size=8, line=dict(color=SUPERFICIE, width=2)),
+            hovertemplate="%{x|%Y-%m-%d}<br>Pendientes: %{y:,.0f}<extra></extra>",
         ))
-        fig_l.update_layout(
-            height=360,
-            margin=dict(l=10, r=10, t=10, b=10),
-            plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
-            font=dict(family="Nunito, sans-serif", size=13),
-            xaxis=dict(title="Fecha de corte", showgrid=True, gridcolor="#EEEEEE"),
-            yaxis=dict(title="N° de rupturas", showgrid=True, gridcolor="#EEEEEE"),
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-        )
+        estilo_grafico(fig_l, alto=350, mostrar_leyenda=True,
+                       margen=dict(l=8, r=18, t=34, b=8))
+        fig_l.update_layout(hovermode="x unified")
+        fig_l.update_xaxes(title="Fecha de corte")
+        fig_l.update_yaxes(title="N° de rupturas", separatethousands=True)
         st.plotly_chart(fig_l, use_container_width=True)
     else:
         st.info("El archivo no contiene columna de fecha de corte.")
@@ -2042,11 +2528,14 @@ def render_modulo_seguimiento():
     st.divider()
 
     # --- Rupturas por fecha, desglosado por causa ---
-    st.subheader("📅 Rupturas por fecha y causa")
-    st.caption(
-        "Número de rupturas por fecha de corte, desglosado por causa. Incluye "
-        "todas las rupturas del periodo filtrado; las que aún no tienen "
-        "explicación registrada se agrupan como 'Sin explicación'."
+    st.markdown(
+        titulo_seccion(
+            "📅 Rupturas por fecha y causa",
+            "Número de rupturas por fecha de corte, desglosado por causa. Incluye "
+            "todas las rupturas del periodo filtrado; las que aún no tienen "
+            "explicación registrada se agrupan como 'Sin explicación'.",
+        ),
+        unsafe_allow_html=True,
     )
     fecha_causa = base.copy()
     fecha_causa["causa_mostrada"] = fecha_causa["explicacion"].replace("", "Sin explicación")
@@ -2070,45 +2559,52 @@ def render_modulo_seguimiento():
                 .reindex(orden_fechas, fill_value=0)
             )
             valores = conteo.values.astype(int)
+            relleno = color_causa_map.get(causa, "#C9CDD1")
             fig_fecha.add_trace(go.Bar(
                 x=etiquetas_fecha, y=valores, name=causa,
-                marker_color=color_causa_map.get(causa, "#C9CDD1"),
-                text=[str(v) if v > 0 else "" for v in valores],
+                # Línea de 2px en color de superficie = separación entre segmentos
+                # apilados (el hueco es lo que separa, no un borde de contraste).
+                marker=dict(color=relleno,
+                            line=dict(color=SUPERFICIE, width=2)),
+                # Solo se rotula el segmento que tiene altura para contener el
+                # número; el resto lo llevan el tooltip y las tablas de abajo.
+                text=[str(v) if v >= 2 else "" for v in valores],
                 textposition="inside",
-                insidetextfont=dict(color="white", size=11),
-                constraintext="none",
+                insidetextfont=dict(color=tinta_sobre(relleno), size=11),
+                constraintext="both",
                 hovertemplate=f"{causa}<br>%{{x}}: %{{y}} rupturas<extra></extra>",
             ))
-        fig_fecha.update_layout(
-            barmode="stack",
-            height=380,
-            margin=dict(l=10, r=10, t=10, b=10),
-            plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
-            font=dict(family="Nunito, sans-serif", size=13),
-            xaxis=dict(title="Fecha de corte", type="category"),
-            yaxis=dict(title="N° de rupturas", showgrid=True, gridcolor="#EEEEEE",
-                       tick0=0, dtick=1, range=[0, max_n + 1]),
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0,
-                        traceorder="normal"),
-        )
+        fig_fecha.update_layout(barmode="stack", bargap=0.4)
+        estilo_grafico(fig_fecha, alto=380, mostrar_leyenda=True,
+                       margen=dict(l=8, r=18, t=52, b=8))
+        fig_fecha.update_layout(legend=dict(traceorder="normal"))
+        fig_fecha.update_xaxes(title="Fecha de corte", type="category")
+        fig_fecha.update_yaxes(title="N° de rupturas", tick0=0, dtick=1,
+                               range=[0, max_n + 1])
         st.plotly_chart(fig_fecha, use_container_width=True)
 
     st.divider()
 
     # --- Ranking de destinos y de causas con más rupturas (acumulado del registro) ---
     if vista == "Plantas":
-        st.subheader("🔎 Rupturas por Planta y Top 5 causas")
-        st.caption(
-            "Rupturas por cada planta y ranking de las 5 causas con más rupturas de lo "
-            "que va del periodo filtrado; las que aún no tienen explicación registrada se "
-            "agrupan como 'Sin explicación'."
+        st.markdown(
+            titulo_seccion(
+                "🔎 Rupturas por planta y top 5 causas",
+                "Rupturas por cada planta y ranking de las 5 causas con más rupturas de lo "
+                "que va del periodo filtrado; las que aún no tienen explicación registrada se "
+                "agrupan como 'Sin explicación'.",
+            ),
+            unsafe_allow_html=True,
         )
     else:
-        st.subheader(f"🔎 Top 5 {etiqueta_vista} y causas con más rupturas")
-        st.caption(
-            f"Ranking de los 5 {etiqueta_vista.lower()} y las 5 causas con más rupturas de lo "
-            "que va del periodo filtrado; las que aún no tienen explicación registrada se "
-            "agrupan como 'Sin explicación'."
+        st.markdown(
+            titulo_seccion(
+                f"🔎 Top 5 {etiqueta_vista.lower()} y causas con más rupturas",
+                f"Ranking de los 5 {etiqueta_vista.lower()} y las 5 causas con más rupturas de lo "
+                "que va del periodo filtrado; las que aún no tienen explicación registrada se "
+                "agrupan como 'Sin explicación'.",
+            ),
+            unsafe_allow_html=True,
         )
     causas_base = base.copy()
     causas_base["causa_mostrada"] = causas_base["explicacion"].replace("", "Sin explicación")
@@ -2127,21 +2623,21 @@ def render_modulo_seguimiento():
         valores_cedis = conteo_cedis.values[::-1]
         fig_top_cedi = go.Figure(go.Bar(
             y=orden_cedis, x=valores_cedis, orientation="h",
-            marker_color=COLOR_PRIMARIO,
+            marker=dict(color=COLOR_PRIMARIO, cornerradius=4),
             text=[str(v) for v in valores_cedis],
             textposition="outside",
+            textfont=dict(size=11.5, color=TINTA_2),
+            cliponaxis=False,
             hovertemplate="%{y}: %{x} rupturas<extra></extra>",
         ))
-        fig_top_cedi.update_layout(
-            height=max(260, 45 * len(orden_cedis)),
-            margin=dict(l=10, r=30, t=10, b=10),
-            plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
-            font=dict(family="Nunito, sans-serif", size=13),
-            xaxis=dict(title="N° de rupturas", showgrid=True, gridcolor="#EEEEEE",
-                       tick0=0, dtick=1, range=[0, int(conteo_cedis.max()) + 1]),
-            yaxis=dict(title=""),
-            showlegend=False,
-        )
+        fig_top_cedi.update_layout(bargap=0.45)
+        estilo_grafico(fig_top_cedi, alto=max(260, 46 * len(orden_cedis)),
+                       margen=dict(l=8, r=34, t=8, b=8))
+        fig_top_cedi.update_xaxes(title="N° de rupturas", showgrid=True,
+                                  gridcolor=REJILLA, tick0=0, dtick=1,
+                                  range=[0, int(conteo_cedis.max()) + 1])
+        fig_top_cedi.update_yaxes(title="", showgrid=False, linecolor=BORDE,
+                                  tickfont=dict(size=12, color=TINTA_2))
         st.plotly_chart(fig_top_cedi, use_container_width=True)
 
     with col_top_causa:
@@ -2154,21 +2650,24 @@ def render_modulo_seguimiento():
         valores_top_causas = top_causas_n.values[::-1]
         fig_top_causa = go.Figure(go.Bar(
             y=orden_top_causas, x=valores_top_causas, orientation="h",
-            marker_color=[color_causa_map.get(c, "#C9CDD1") for c in orden_top_causas],
+            marker=dict(
+                color=[color_causa_map.get(c, "#C9CDD1") for c in orden_top_causas],
+                cornerradius=4,
+            ),
             text=[str(v) for v in valores_top_causas],
             textposition="outside",
+            textfont=dict(size=11.5, color=TINTA_2),
+            cliponaxis=False,
             hovertemplate="%{y}: %{x} rupturas<extra></extra>",
         ))
-        fig_top_causa.update_layout(
-            height=max(260, 45 * len(orden_top_causas)),
-            margin=dict(l=10, r=30, t=10, b=10),
-            plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
-            font=dict(family="Nunito, sans-serif", size=13),
-            xaxis=dict(title="N° de rupturas", showgrid=True, gridcolor="#EEEEEE",
-                       tick0=0, dtick=1, range=[0, int(top_causas_n.max()) + 1]),
-            yaxis=dict(title=""),
-            showlegend=False,
-        )
+        fig_top_causa.update_layout(bargap=0.45)
+        estilo_grafico(fig_top_causa, alto=max(260, 46 * len(orden_top_causas)),
+                       margen=dict(l=8, r=34, t=8, b=8))
+        fig_top_causa.update_xaxes(title="N° de rupturas", showgrid=True,
+                                   gridcolor=REJILLA, tick0=0, dtick=1,
+                                   range=[0, int(top_causas_n.max()) + 1])
+        fig_top_causa.update_yaxes(title="", showgrid=False, linecolor=BORDE,
+                                   tickfont=dict(size=12, color=TINTA_2))
         st.plotly_chart(fig_top_causa, use_container_width=True)
 
     gest_causas = base[base["gestionada"]]
@@ -2188,7 +2687,10 @@ def render_modulo_seguimiento():
     gest_df = base[base["gestionada"] & base["explicacion"].apply(_es_motivo_otro)].copy()
 
     if not pend_df.empty:
-        st.subheader(f"⏳ Rupturas pendientes de gestión ({len(pend_df):,})")
+        st.markdown(
+            titulo_seccion(f"⏳ Rupturas pendientes de gestión ({len(pend_df):,})"),
+            unsafe_allow_html=True,
+        )
         cols_p = [c for c in ["fecha_corte", "destino", "item",
                                "referencia", "inv_ayer", "vendido", "inv_hoy"]
                   if c in pend_df.columns]
@@ -2200,7 +2702,10 @@ def render_modulo_seguimiento():
         st.dataframe(vista_p, use_container_width=True, hide_index=True, height=280)
 
     if not gest_df.empty:
-        st.subheader(f"✅ Rupturas gestionadas con motivo Otro ({len(gest_df):,})")
+        st.markdown(
+            titulo_seccion(f"✅ Rupturas gestionadas con motivo Otro ({len(gest_df):,})"),
+            unsafe_allow_html=True,
+        )
         cols_g = [c for c in ["fecha_corte", "destino", "item",
                                "referencia", "responsable_inv", "otro"] if c in gest_df.columns]
         vista_g = gest_df[cols_g].rename(columns={
@@ -2215,9 +2720,16 @@ def render_modulo_seguimiento():
 # NAVEGACIÓN
 # ===========================================================================
 with st.sidebar:
-    st.markdown(f"<h2 style='color:{COLOR_PRIMARIO}; font-weight:900;'>🥚 Huevos Kikes</h2>",
-                unsafe_allow_html=True)
-    st.markdown("**Panel de Inventarios**")
+    st.markdown(
+        '<div class="marca">'
+        '<div class="marca-logo">🥚</div>'
+        '<div class="marca-txt">'
+        '<div class="marca-nombre">Huevos Kikes</div>'
+        '<div class="marca-sub">Panel de inventarios</div>'
+        '</div></div>',
+        unsafe_allow_html=True,
+    )
+    st.markdown('<div class="nav-rotulo">Módulos</div>', unsafe_allow_html=True)
     modulo = st.radio(
         "Módulo",
         ["Inventario de Edades", "Análisis de Rotación PEPS", "Seguimiento de Rupturas"],
@@ -2228,13 +2740,37 @@ with st.sidebar:
                  help="Limpia el caché y vuelve a leer los archivos del repositorio."):
         st.cache_data.clear()
         st.rerun()
-    st.caption(
-        "Sube a la raíz del repositorio (con espacio o guion bajo):\n\n"
-        f"• **{ARCHIVO_HOY}**\n\n"
-        f"• **{ARCHIVO_AYER}**\n\n"
-        f"• **{ARCHIVO_VENTAS}**\n\n"
-        f"• **{ARCHIVO_PEDIDOS}**"
+
+    # Origen de datos: mismos archivos de siempre, con la fecha en que se
+    # cargaron por última vez, para saber de un vistazo qué tan fresco está cada uno.
+    st.markdown('<div class="nav-rotulo">Origen de datos</div>', unsafe_allow_html=True)
+    filas_archivos = []
+    for etiqueta, ruta in [
+        ("Inventario hoy", ARCHIVO_HOY),
+        ("Inventario ayer", ARCHIVO_AYER),
+        ("Ventas", ARCHIVO_VENTAS),
+        ("Pedidos", ARCHIVO_PEDIDOS),
+        ("Inventarios (tránsito)", ARCHIVO_INVENTARIOS),
+        ("Kardex", ARCHIVO_KARDEX),
+    ]:
+        ts = mtime(ruta)
+        if ts:
+            sello = _dt.datetime.fromtimestamp(ts).strftime("%d %b · %H:%M")
+            punto, color_pt = "●", COLOR_PRIMARIO
+        else:
+            sello, punto, color_pt = "sin cargar", "○", TINTA_3
+        filas_archivos.append(
+            f'<div style="display:flex; align-items:center; gap:8px; padding:3px 0;">'
+            f'<span style="color:{color_pt}; font-size:0.6rem;">{punto}</span>'
+            f'<span style="flex:1; color:{TINTA_2};">{etiqueta}</span>'
+            f'<span style="color:{TINTA_3}; font-variant-numeric:tabular-nums;">{sello}</span>'
+            f'</div>'
+        )
+    st.markdown(
+        f'<div style="font-size:0.755rem; line-height:1.45;">{"".join(filas_archivos)}</div>',
+        unsafe_allow_html=True,
     )
+    st.caption("Sube los archivos a la raíz del repositorio (con espacio o guion bajo).")
 
 if modulo == "Inventario de Edades":
     render_modulo_edades()
