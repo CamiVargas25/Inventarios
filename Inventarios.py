@@ -1741,6 +1741,17 @@ def render_modulo_rotacion():
             "Asumiré **1 día** de diferencia; si vienes de un puente, los resultados no serán confiables."
         )
 
+    # Un salto de más de un día no es un error, pero cambia lo que significan las
+    # cifras: se avisa para que un cero de rupturas no se lea como buena noticia.
+    if fechas_ok and dias > 1:
+        st.warning(
+            f"📆 La ventana analizada abarca **{dias} días** (corte de ayer "
+            f"**{f_ayer.date()}** → corte de hoy **{f_hoy.date()}**), no uno. Los lotes "
+            f"envejecen +{dias} días y el despacho de planta se acumula sobre las "
+            f"{dias} fechas del período. Si esperabas un solo día, revisa que "
+            "*Inventario Ayer* sea el corte inmediatamente anterior."
+        )
+
     # Fecha de corte 'hoy' (la del inventario de hoy). Para PET, su venta exacta
     # se toma de este día dentro del archivo de ventas.
     fecha_corte_obj = f_hoy.date() if fechas_ok else _dt.date.today()
@@ -1752,15 +1763,27 @@ def render_modulo_rotacion():
 
     # --- Despacho de plantas hacia otros CEDIs (movimiento que la venta no ve) ---
     # Para destinos de planta, el "vendido" del PEPS = SOLO lo despachado según
-    # 19.1 Pedidos.xlsx (fec_doc_entrega en la fecha de corte, después de las 8am).
-    # Se descarta la venta directa que ventas.xlsx pudiera mapear a estos destinos
-    # (p.ej. BODEGA KIKES->LANZA), para que refleje exactamente lo registrado en
-    # Pedidos. CEDI no cambia: sigue usando venta_peps (ventas.xlsx) tal cual.
+    # 19.1 Pedidos.xlsx (fec_doc_entrega después de las 8am). Se descarta la venta
+    # directa que ventas.xlsx pudiera mapear a estos destinos (p.ej. BODEGA
+    # KIKES->LANZA), para que refleje exactamente lo registrado en Pedidos.
+    # CEDI no cambia: sigue usando venta_peps (ventas.xlsx) tal cual.
+    #
+    # La ventana cubre TODAS las fechas del período analizado, no solo la de corte:
+    # las posteriores al corte de ayer y hasta el de hoy, o sea 'dias' fechas. Con
+    # dias=1 (día normal) eso es exactamente la fecha de corte, igual que antes.
+    # Importa cuando hay salto: si el corte de ayer es viernes y el de hoy domingo,
+    # el motor envejece los lotes +2 días y el inventario real ya refleja 2 días de
+    # salidas, así que consumir un solo día de despacho deja el teórico muy alto,
+    # el exceso sale negativo y las rupturas desaparecen. Peor aún: los (destino,
+    # item) sin despacho ese día quedan con vendido=0 y la condición de ruptura
+    # exige vendido>0, así que no pueden alertar ni con lote varado.
+    inicio_ventana = fecha_corte_obj - _dt.timedelta(days=dias)
     try:
         despachos = leer_despachos_planta(ARCHIVO_PEDIDOS, mtime(ARCHIVO_PEDIDOS))
-        es_fecha_corte = despachos["fecha_doc_entrega"].dt.date == fecha_corte_obj
+        fechas_desp = despachos["fecha_doc_entrega"].dt.date
+        en_ventana = (fechas_desp > inicio_ventana) & (fechas_desp <= fecha_corte_obj)
         es_despues_8am = despachos["fecha_doc_entrega"].dt.time > _dt.time(8, 0)
-        desp_hoy = despachos[es_fecha_corte & es_despues_8am]
+        desp_hoy = despachos[en_ventana & es_despues_8am]
         despacho_map = desp_hoy.groupby(["destino", "item"])["cantidad"].sum().to_dict()
     except FileNotFoundError:
         despacho_map = {}
