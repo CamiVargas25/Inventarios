@@ -100,6 +100,10 @@ HOJA_INV_ANALISIS = "INV. EDADES"  # hoja para el módulo 2 (análisis de rotaci
 HOJA_TRANSITO = "Inventarios"      # hoja de Inventarios.xlsx con el inventario en tránsito
 HOJA_KARDEX = "Kardex"             # hoja de kardex.xlsx con los movimientos E/S de las VT
 UMBRAL_DIAS_TRANSITO = 3           # días en tránsito a partir de los cuales se considera varado
+# Bodegas de tránsito excluidas de la alerta de varado. VTPULV guarda huevo roto
+# destinado a pulverizado: por naturaleza se acumula ahí y no es un varado real,
+# así que inflaba la alerta con su volumen.
+BODEGAS_TRANSITO_EXCLUIDAS = {"VTPULV"}
 
 
 def mtime(ruta: str) -> float:
@@ -631,6 +635,7 @@ def cargar_transito_varado_kardex(
     ruta: str,
     ruta_snapshot: str,
     umbral_dias: int,
+    bodegas_excluidas: tuple = (),
     cache_key: float = 0.0,
     cache_key_snapshot: float = 0.0,
 ) -> tuple:
@@ -647,6 +652,9 @@ def cargar_transito_varado_kardex(
     ningún lote ni genera saldo negativo. Los lotes que quedan con saldo > 0 al
     final son el inventario que sigue varado en tránsito, con su fecha de entrada
     original.
+
+    Las bodegas listadas en 'bodegas_excluidas' (por código) se descartan antes de
+    reconstruir los lotes, así que no aportan filas ni salidas huérfanas.
 
     Cada saldo remanente se cruza además contra el snapshot actual
     ('Inventarios.xlsx'): si esa combinación bodega+artículo no aparece ahí con
@@ -670,6 +678,9 @@ def cargar_transito_varado_kardex(
     })
     base = base.dropna(subset=["fecha", "orden"])
     base = base[base["producto"].astype(str).str.upper().str.startswith("HUEVO")]
+    if bodegas_excluidas:
+        excluidas = {str(b).strip().upper() for b in bodegas_excluidas}
+        base = base[~base["codigo_bodega"].astype(str).str.strip().str.upper().isin(excluidas)]
     base = base.sort_values(["codigo_bodega", "codigo_articulo", "orden"])
 
     filas = []
@@ -867,11 +878,16 @@ def render_modulo_edades():
         )
 
     st.divider()
+    _txt_vt_excluidas = (
+        "<b>" + ", ".join(sorted(BODEGAS_TRANSITO_EXCLUIDAS)) + "</b>"
+        if BODEGAS_TRANSITO_EXCLUIDAS else "ninguna"
+    )
     st.markdown(
         titulo_seccion(
             "🚚 Alerta de inventario varado en tránsito",
             f"Reconstrucción PEPS de huevo (por descripción 'HUEVO...') a partir de los "
-            f"movimientos E/S de <b>{ARCHIVO_KARDEX}</b>. Por cada bodega+artículo se consume primero "
+            f"movimientos E/S de <b>{ARCHIVO_KARDEX}</b>, sobre <b>todas las bodegas de tránsito (VT) "
+            f"configuradas</b> excepto {_txt_vt_excluidas}. Por cada bodega+artículo se consume primero "
             f"el lote más antiguo; lo que queda sin salida y lleva <b>{UMBRAL_DIAS_TRANSITO} días o más</b> "
             f"desde su entrada se marca como varado. Las salidas huérfanas (sin entrada previa en el "
             f"kardex) se ignoran sin afectar el resto de la serie. Cada saldo remanente se cruza además "
@@ -887,6 +903,7 @@ def render_modulo_edades():
     try:
         transito_kdx, n_huerfanas, snapshot_ok_kdx = cargar_transito_varado_kardex(
             ARCHIVO_KARDEX, ARCHIVO_INVENTARIOS, UMBRAL_DIAS_TRANSITO,
+            tuple(sorted(BODEGAS_TRANSITO_EXCLUIDAS)),
             mtime(ARCHIVO_KARDEX), mtime(ARCHIVO_INVENTARIOS),
         )
         cargo_ok_kdx = True
@@ -1504,6 +1521,84 @@ def peps_consumir(inv_envejecido, vendido):
     return rem, restante
 
 
+# --- Detector de ruptura por cohortes: SOLO CEDI, y SIN usar la venta ----------
+# Prueba en paralelo (agosto 2026). El motor principal mide el varado contra un
+# teórico construido con la venta, y la venta no es un dato real: su magnitud es
+# aproximada, su mapeo bodega->destino descarta ~18% y nunca produce los nombres
+# de los Centros de Empaque. Esto lo vuelve frágil justo donde importa: si el
+# 'vendido' queda en 0 la clave no se evalúa (no es que pase la prueba).
+#
+# La ruptura de ORDEN PEPS, en cambio, se observa sin la venta: basta comparar
+# qué FRACCIÓN de cada cohorte salió entre los dos inventarios. Si una cohorte
+# más NUEVA rotó proporcionalmente más que una más VIEJA, se rompió el orden.
+# Solo necesita 'INV. EDADES' de los dos archivos -> misma fuente, mismos strings
+# de destino, cero cruce entre archivos y por tanto cero problemas de mapeo.
+UMBRAL_INFLADO_COH = 1.10      # cohorte que crece más de 10%: entró producto, no es rotación
+TOLERANCIA_ROTACION_COH = 0.10  # diferencia mínima de fracción rotada para llamarlo ruptura
+# Motivos por los que una clave no se puede evaluar. Cadenas fijas (sin números
+# interpolados) para poder agruparlas en la tabla de desglose.
+MOTIVO_UN_LOTE = "Un solo lote ayer: no hay orden que romper"
+MOTIVO_INFLADO = "Quedó un solo lote comparable al excluir cohortes infladas"
+
+
+def detectar_ruptura_cohortes(va, vh, dias, tol=TOLERANCIA_ROTACION_COH):
+    """Ruptura de orden PEPS observada solo con los dos inventarios, sin la venta.
+
+    va / vh: dict edad->cantidad de ayer y de hoy para un (destino, item).
+    Envejece las cohortes de ayer +dias, calcula qué fracción de cada una salió
+    y busca el peor par (vieja, nueva) donde la nueva rotó más que la vieja.
+
+    Las unidades reportadas son el mínimo entre lo que se quedó en la cohorte vieja
+    y lo que salió de la nueva: son las que debieron salir primero y no salieron.
+    Se toma el peor par, no la suma, para no contar dos veces el mismo producto.
+
+    Devuelve un dict con: evaluable, unds, evidencia, motivo, par (las dos edades
+    de hoy que forman la inversión: la vieja que se quedó y la nueva que se
+    adelantó), y los mapas frac/salida por edad para poder mostrar el detalle
+    lote a lote. 'evaluable' es False cuando hay menos de dos cohortes comparables:
+    con un solo lote no existe orden que romper.
+    """
+    va_env = defaultdict(float)
+    for e, c in va.items():
+        va_env[e + dias] += c
+
+    frac, salida = {}, {}
+    for e, c_ayer_coh in va_env.items():
+        c_real = vh.get(e, 0.0)
+        if c_real > c_ayer_coh * UMBRAL_INFLADO_COH + 0.5:
+            continue                      # la cohorte creció: entró producto, no rotó
+        salida[e] = max(0.0, c_ayer_coh - c_real)
+        frac[e] = salida[e] / c_ayer_coh if c_ayer_coh > 0 else 0.0
+
+    if len(frac) < 2:
+        # No evaluable: hay que distinguir por qué, porque son dos cosas distintas.
+        # Un solo lote = la pregunta no aplica. Cohortes excluidas por inflado = sí
+        # había con qué comparar, pero el crecimiento del lote lo impide.
+        if len(va_env) < 2:
+            motivo = MOTIVO_UN_LOTE
+        else:
+            motivo = MOTIVO_INFLADO
+        return {"evaluable": False, "unds": 0.0, "evidencia": "", "motivo": motivo,
+                "par": None, "frac": frac, "salida": salida}
+
+    peor, evidencia, par = 0.0, "", None
+    for e_viejo in sorted(frac, reverse=True):
+        for e_nuevo in frac:
+            if e_nuevo >= e_viejo:
+                continue
+            if frac[e_nuevo] <= frac[e_viejo] + tol:
+                continue
+            quedo_viejo = va_env[e_viejo] - salida[e_viejo]
+            unds = min(quedo_viejo, salida[e_nuevo])
+            if unds > peor + 0.5:
+                peor = unds
+                par = (e_viejo, e_nuevo)
+                evidencia = (f"lote {e_viejo}d rotó {frac[e_viejo] * 100:.1f}% "
+                             f"mientras el de {e_nuevo}d rotó {frac[e_nuevo] * 100:.1f}%")
+    return {"evaluable": True, "unds": peor, "evidencia": evidencia, "motivo": "",
+            "par": par, "frac": frac, "salida": salida}
+
+
 def construir_analisis(inv_ayer, inv_hoy, ventas, dias=1, venta_peps=None, cat_map=None):
     """Motor PEPS consciente de los días transcurridos.
 
@@ -1641,8 +1736,21 @@ def construir_analisis(inv_ayer, inv_hoy, ventas, dias=1, venta_peps=None, cat_m
                 if vh.get(e_hoy_coh, 0.0) > c_ayer_coh * UMBRAL_INFLADO + 0.5:
                     edades_infladas.add(e_hoy_coh)
 
+        # --- Prueba en paralelo: detector por cohortes, SOLO CEDI ---
+        # No usa la venta. En planta no se calcula y los campos van vacíos, para que
+        # el motor de planta quede exactamente como está (ver detectar_ruptura_cohortes).
+        if es_planta:
+            coh_r = {"evaluable": False, "unds": 0.0, "evidencia": "", "motivo": "",
+                     "par": None, "frac": {}, "salida": {}}
+        else:
+            coh_r = detectar_ruptura_cohortes(va, vh, dias)
+
         filas.append({
             "destino": dest, "item": item, "referencia": ref_map.get(item, ""),
+            "coh_evaluable": coh_r["evaluable"], "coh_ruptura": coh_r["unds"] > 0.5,
+            "coh_unds": round(coh_r["unds"], 0), "coh_evidencia": coh_r["evidencia"],
+            "coh_motivo": coh_r["motivo"], "coh_par": coh_r["par"],
+            "coh_frac": dict(coh_r["frac"]), "coh_salida": dict(coh_r["salida"]),
             "categoria": cat_map.get((dest, item), "SUELTO"),
             "cant_ayer": tot_ayer, "edad_ayer": round(ep_ayer, 1),
             "vendido": vendido,
@@ -1865,8 +1973,9 @@ def render_modulo_rotacion():
         _csv_bytes_rup = _exp_csv.to_csv(index=False).encode("utf-8-sig")
 
     # ----- Sub-secciones por pestañas -----
-    tab1, tab2 = st.tabs(
-        ["🚨 Rupturas PEPS", "📋 Detalle por destino (ayer vs hoy)"]
+    tab1, tab2, tab3 = st.tabs(
+        ["🚨 Rupturas PEPS", "📋 Detalle por destino (ayer vs hoy)",
+         "🧪 Prueba: cohortes (CEDI)"]
     )
 
     # ===== TAB 1: RUPTURAS PEPS =====
@@ -2008,6 +2117,9 @@ def render_modulo_rotacion():
                         use_container_width=True, hide_index=True,
                     )
 
+    # ----- PRUEBA EN PARALELO: detector por cohortes, solo CEDI -----
+    # Corre junto al motor de la venta, sin reemplazarlo, para comparar veredictos
+    # con casos reales antes de decidir. Planta queda fuera por completo.
         # ----- Explicación de rupturas: se hace en el Sheet histórico -----
         st.divider()
         st.markdown("#### 📝 Registrar explicación de una ruptura")
@@ -2024,6 +2136,246 @@ def render_modulo_rotacion():
                 URL_SHEET_HISTORICO,
                 use_container_width=True,
             )
+
+    # ===== TAB 3: PRUEBA EN PARALELO — detector por cohortes (solo CEDI) =====
+    with tab3:
+        res_cedi = res[res["destino"].apply(tipo_destino) == "CEDI"]
+        if res_cedi.empty:
+            st.info(
+                "El filtro **Tipo de destino** está en *Planta*, así que no hay CEDI que evaluar aquí. Cámbialo a *Todos* o *CEDI (TAT)* para ver esta prueba."
+            )
+        st.divider()
+        st.markdown(
+            titulo_seccion("🧪 Prueba en paralelo · detector por cohortes (solo CEDI)"),
+            unsafe_allow_html=True,
+        )
+        st.caption(
+            "Detecta la ruptura de **orden** PEPS sin usar la venta: compara qué fracción "
+            "de cada lote salió entre los dos inventarios y marca cuando un lote **más nuevo** "
+            "rotó proporcionalmente más que uno **más viejo**. Solo lee `INV. EDADES` de los dos "
+            "archivos, así que no depende del mapeo bodega→destino ni de la magnitud de la venta. "
+            "No reemplaza nada: está aquí para comparar."
+        )
+
+        evaluables = int(res_cedi["coh_evaluable"].sum())
+        coh = res_cedi[res_cedi["coh_ruptura"]].copy()
+        actuales = res_cedi[res_cedi["ruptura"]]
+        k_act = set(zip(actuales["destino"], actuales["item"]))
+        k_coh = set(zip(coh["destino"], coh["item"]))
+
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            st.markdown(tarjeta_kpi("Claves CEDI evaluables", f"{evaluables:,} de {len(res_cedi):,}"),
+                        unsafe_allow_html=True)
+            st.caption(
+                "Una **clave** es un par destino + item. Evaluable = tiene 2 o más lotes de "
+                "edades distintas que se pueden comparar, que es donde la pregunta *¿salió "
+                "primero el más viejo?* tiene sentido."
+            )
+        with c2:
+            st.markdown(tarjeta_kpi("Detecta el motor actual (venta)", f"{len(k_act):,}",
+                                    estado="critical" if k_act else "neutral"),
+                        unsafe_allow_html=True)
+        with c3:
+            st.markdown(tarjeta_kpi("Detecta por cohortes (sin venta)", f"{len(k_coh):,}",
+                                    estado="critical" if k_coh else "neutral", reina=True),
+                        unsafe_allow_html=True)
+
+        st.caption(
+            f"Coinciden: **{len(k_act & k_coh)}** · solo el motor actual: **{len(k_act - k_coh)}** · "
+            f"solo por cohortes: **{len(k_coh - k_act)}**"
+        )
+
+        # Desglose del KPI de evaluables: por qué las demás quedan fuera. Importa
+        # distinguir "la pregunta no aplica" de "no se pudo comparar", que es lo
+        # único que sería un hueco real del método.
+        no_ev = res_cedi[~res_cedi["coh_evaluable"]]
+        if not no_ev.empty:
+            with st.expander(
+                f"¿Por qué {len(no_ev):,} de las {len(res_cedi):,} claves de CEDI no son evaluables?"
+            ):
+                resumen = (no_ev.groupby("coh_motivo").size().reset_index(name="Claves")
+                           .rename(columns={"coh_motivo": "Motivo"})
+                           .sort_values("Claves", ascending=False))
+                resumen["Unds en inventario hoy"] = [
+                    no_ev[no_ev["coh_motivo"] == m]["cant_hoy"].sum() for m in resumen["Motivo"]
+                ]
+                st.dataframe(
+                    resumen.style.format({"Claves": "{:,.0f}", "Unds en inventario hoy": "{:,.0f}"}),
+                    use_container_width=True, hide_index=True,
+                )
+                st.caption(
+                    f"**{MOTIVO_UN_LOTE}** no es una limitación del método: si el SKU tiene un "
+                    "único lote en ese destino, no existe un lote más nuevo que pudiera haberse "
+                    f"adelantado. · **{MOTIVO_INFLADO}** sí es un límite real: había lotes que "
+                    f"comparar, pero uno creció más de "
+                    f"{(UMBRAL_INFLADO_COH - 1) * 100:.0f}% respecto a ayer (entró producto a esa "
+                    "misma edad) y no se puede saber qué parte salió y qué parte entró."
+                )
+                det_ne = no_ev.sort_values("cant_hoy", ascending=False)[
+                    ["destino", "item", "referencia", "cant_ayer", "cant_hoy", "coh_motivo"]
+                ].copy()
+                det_ne["item"] = pd.to_numeric(det_ne["item"], errors="coerce").astype("Int64")
+                det_ne = det_ne.rename(columns={
+                    "destino": "Destino", "item": "Item", "referencia": "Referencia",
+                    "cant_ayer": "Inv. ayer", "cant_hoy": "Inv. hoy", "coh_motivo": "Motivo",
+                })
+                st.markdown("**Detalle clave por clave**")
+                st.dataframe(
+                    det_ne.style.format({"Inv. ayer": "{:,.0f}", "Inv. hoy": "{:,.0f}",
+                                         "Item": "{:.0f}"}),
+                    use_container_width=True, hide_index=True,
+                )
+
+        if coh.empty:
+            st.success("✅ El detector por cohortes no encontró rupturas de orden en CEDI.")
+        else:
+            tc = coh.sort_values("coh_unds", ascending=False)[
+                ["destino", "item", "referencia", "cant_ayer", "cant_hoy",
+                 "coh_unds", "coh_evidencia", "vendido", "ruptura"]
+            ].copy()
+            tc["item"] = pd.to_numeric(tc["item"], errors="coerce").astype("Int64")
+            tc["ruptura"] = tc["ruptura"].map({True: "✅ también", False: "🆕 solo cohortes"})
+            tc = tc.rename(columns={
+                "destino": "Destino", "item": "Item", "referencia": "Referencia",
+                "cant_ayer": "Inv. ayer", "cant_hoy": "Inv. hoy",
+                "coh_unds": "Unds varadas (cohortes)", "coh_evidencia": "Evidencia",
+                "vendido": "Vendido (referencia)", "ruptura": "¿Lo ve el motor actual?",
+            })
+            st.dataframe(
+                tc.style.format({"Inv. ayer": "{:,.0f}", "Inv. hoy": "{:,.0f}",
+                                 "Unds varadas (cohortes)": "{:,.0f}",
+                                 "Vendido (referencia)": "{:,.0f}", "Item": "{:.0f}"})
+                  .map(lambda _: f"color:{COLOR_CRITICO}; font-weight:800;",
+                       subset=["Unds varadas (cohortes)"]),
+                use_container_width=True, hide_index=True,
+            )
+            st.caption(
+                "La columna **Vendido** va solo como referencia: el detector no la usa. "
+                "Las filas *solo cohortes* son las que el motor de la venta no puede ver, "
+                "normalmente porque su `vendido` quedó en 0."
+            )
+
+            # --- Detalle lote a lote, equivalente al de la pestaña de rupturas ---
+            # Mismas columnas salvo 'Teórico hoy (PEPS)', que sale de la venta y aquí
+            # no existe: en su lugar van 'Salió' y '% rotado', que es lo que se compara.
+            st.markdown("##### Detalle por lote de la ruptura seleccionada")
+            coh_orden = coh.sort_values(["destino", "coh_unds"], ascending=[True, False])
+            opciones_coh = [
+                f"{r.destino} — {int(r.item) if str(r.item).isdigit() else r.item} — {r.referencia}"
+                for r in coh_orden.itertuples()
+            ]
+            sel_coh = st.selectbox(
+                "Selecciona una ruptura por cohortes para ver el detalle lote a lote",
+                opciones_coh, key="sel_detalle_cohortes",
+            )
+            if sel_coh:
+                rc = coh_orden.iloc[opciones_coh.index(sel_coh)]
+                e_vieja, e_nueva = rc["coh_par"] if rc["coh_par"] else (None, None)
+                st.caption(
+                    f"Cada fila sigue un **lote** desde su edad de ayer hasta hoy (envejece "
+                    f"+{dias} día(s)). **Salió** = cantidad de ayer − real de hoy a esa misma edad; "
+                    "**% rotado** = qué fracción de ese lote se movió. La ruptura es que el lote "
+                    "más nuevo tenga un % más alto que el más viejo. No interviene la venta."
+                )
+
+                filas_coh = []
+                for e_ayer in sorted(rc["vec_ayer"].keys(), reverse=True):
+                    e_hoy_c = e_ayer + dias
+                    c_ayer = rc["vec_ayer"].get(e_ayer, 0)
+                    c_hoy = rc["vec_real"].get(e_hoy_c, 0)
+                    fr = rc["coh_frac"].get(e_hoy_c)
+                    if fr is None:
+                        estado = "📦 Excluido: el lote creció (entró producto a esa edad)"
+                        salio, pct = None, None
+                    else:
+                        salio = rc["coh_salida"].get(e_hoy_c, 0.0)
+                        pct = fr * 100
+                        if e_hoy_c == e_vieja:
+                            estado = "⚠️ Lote viejo que se quedó"
+                        elif e_hoy_c == e_nueva:
+                            estado = "➡️ Lote más nuevo que se adelantó"
+                        else:
+                            estado = ""
+                    filas_coh.append({
+                        "Lote (edad ayer → hoy)": f"{e_ayer}d → {e_hoy_c}d",
+                        "Cantidad ayer": c_ayer,
+                        "Real hoy": c_hoy,
+                        "Salió": salio,
+                        "% rotado": pct,
+                        "Estado del lote": estado,
+                    })
+                df_coh_lotes = pd.DataFrame(filas_coh)
+
+                def estilo_lote_coh(row):
+                    estado = str(row.get("Estado del lote", ""))
+                    if "se quedó" in estado:
+                        base = "background-color:#FFE08A; font-weight:700;"
+                    elif "se adelantó" in estado:
+                        base = "background-color:#FFD9C0; font-weight:700;"
+                    elif "Excluido" in estado:
+                        base = "background-color:#D6E9F8; font-weight:700;"
+                    else:
+                        base = ""
+                    return [base] * len(row)
+
+                st.markdown("**Lotes que venían de ayer**")
+                st.dataframe(
+                    df_coh_lotes.style
+                    .apply(estilo_lote_coh, axis=1)
+                    .format({"Cantidad ayer": "{:,.0f}", "Real hoy": "{:,.0f}",
+                             "Salió": "{:,.0f}", "% rotado": "{:.1f}%"}, na_rep="—"),
+                    use_container_width=True, hide_index=True,
+                )
+                st.caption(
+                    f"Unidades varadas de esta ruptura: **{rc['coh_unds']:,.0f}** = el mínimo entre "
+                    "lo que se quedó en el lote viejo y lo que salió del más nuevo. Se toma el peor "
+                    "par de lotes, no la suma de todos, para no contar dos veces el mismo producto."
+                )
+
+                # Entradas nuevas del período: producto que no venía de ayer.
+                edades_coh_ayer = {e + dias for e in rc["vec_ayer"].keys()}
+                edad_max_coh = max(edades_coh_ayer) if edades_coh_ayer else dias
+                filas_nuevas_coh = [
+                    {"Edad hoy": f"⁉️ {e_hoy}d (reaparecido)" if e_hoy > edad_max_coh else f"{e_hoy}d",
+                     "Cantidad hoy": rc["vec_real"].get(e_hoy, 0)}
+                    for e_hoy in sorted(rc["vec_real"].keys()) if e_hoy not in edades_coh_ayer
+                ]
+                if filas_nuevas_coh:
+                    st.markdown("**Entradas nuevas del período** (producto que no existía ayer)")
+                    st.dataframe(
+                        pd.DataFrame(filas_nuevas_coh).style.format({"Cantidad hoy": "{:,.0f}"}),
+                        use_container_width=True, hide_index=True,
+                    )
+
+        solo_act = actuales[~actuales.apply(lambda r: (r["destino"], r["item"]) in k_coh, axis=1)]
+        if not solo_act.empty:
+            with st.expander(f"Ver las {len(solo_act)} que solo detecta el motor actual"):
+                st.caption(
+                    "Casos donde el varado se midió contra el teórico de la venta pero las "
+                    "cohortes no muestran inversión de orden. Útiles para calibrar: si al "
+                    "revisarlos no fueron ruptura real, el detector por cohortes está filtrando bien."
+                )
+                ta = solo_act.sort_values("unds_varadas", ascending=False)[
+                    ["destino", "item", "referencia", "vendido", "unds_varadas", "coh_evaluable"]
+                ].copy()
+                ta["coh_evaluable"] = ta["coh_evaluable"].map(
+                    {True: "sí, y no vio inversión", False: "no (un solo lote)"})
+                ta = ta.rename(columns={
+                    "destino": "Destino", "item": "Item", "referencia": "Referencia",
+                    "vendido": "Vendido", "unds_varadas": "Unds varadas (motor actual)",
+                    "coh_evaluable": "¿Evaluable por cohortes?",
+                })
+                st.dataframe(
+                    ta.style.format({"Vendido": "{:,.0f}", "Unds varadas (motor actual)": "{:,.0f}"}),
+                    use_container_width=True, hide_index=True,
+                )
+
+        st.caption(
+            f"Umbral de la prueba: una cohorte más nueva debe rotar al menos "
+            f"**{TOLERANCIA_ROTACION_COH * 100:.0f} puntos** por encima de la más vieja. "
+            "Es el primer parámetro a calibrar contra casos que conozcas."
+        )
 
     # ===== TAB 2: DETALLE POR DESTINO — UNA FILA POR LOTE (cohorte ayer → hoy) =====
     with tab2:
